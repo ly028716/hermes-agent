@@ -116,7 +116,7 @@ def redact_session_data(session_dict: dict) -> dict:
     return result
 
 
-def read_body(request) -> dict:
+async def read_body(request) -> dict:
     """Read and JSON-parse a POST request body."""
     try:
         body = await request.body()
