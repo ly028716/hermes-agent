@@ -1710,6 +1710,232 @@ async def delete_session_endpoint(session_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Chat API endpoints (WebUI integration)
+# ---------------------------------------------------------------------------
+
+# Chat UI static files directory
+WEB_CHAT_DIST = Path(__file__).parent / "web_chat_dist"
+
+# Chat sessions storage
+_chat_sessions: Dict[str, Dict[str, Any]] = {}
+_chat_sessions_lock = threading.Lock()
+
+
+class ChatMessage(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    model: Optional[str] = None
+    workspace: Optional[str] = None
+
+
+class ChatCancel(BaseModel):
+    stream_id: str
+
+
+@app.get("/api/chat/sessions")
+async def list_chat_sessions():
+    """List all chat sessions."""
+    with _chat_sessions_lock:
+        sessions = []
+        for sid, sess in _chat_sessions.items():
+            sessions.append({
+                "session_id": sid,
+                "title": sess.get("title", ""),
+                "model": sess.get("model", ""),
+                "workspace": sess.get("workspace", ""),
+                "message_count": len(sess.get("messages", [])),
+                "created_at": sess.get("created_at"),
+                "last_active": sess.get("last_active"),
+            })
+        return {"sessions": sessions, "total": len(sessions)}
+
+
+@app.get("/api/chat/sessions/{session_id}")
+async def get_chat_session(session_id: str):
+    """Get a specific chat session."""
+    with _chat_sessions_lock:
+        if session_id not in _chat_sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return _chat_sessions[session_id]
+
+
+@app.delete("/api/chat/sessions/{session_id}")
+async def delete_chat_session(session_id: str):
+    """Delete a chat session."""
+    with _chat_sessions_lock:
+        if session_id not in _chat_sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+        del _chat_sessions[session_id]
+        return {"ok": True}
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: Request, body: ChatMessage):
+    """SSE streaming chat endpoint."""
+    from fastapi.responses import StreamingResponse
+    import uuid
+
+    # Generate session ID if not provided
+    session_id = body.session_id or uuid.uuid4().hex[:12]
+
+    # Get or create session
+    with _chat_sessions_lock:
+        if session_id not in _chat_sessions:
+            _chat_sessions[session_id] = {
+                "session_id": session_id,
+                "messages": [],
+                "model": body.model or "",
+                "workspace": body.workspace or str(Path.cwd()),
+                "title": "",
+                "created_at": time.time(),
+                "last_active": time.time(),
+            }
+        session = _chat_sessions[session_id]
+
+    # Update session
+    session["last_active"] = time.time()
+    if body.model:
+        session["model"] = body.model
+    if body.workspace:
+        session["workspace"] = body.workspace
+
+    stream_id = f"{session_id}:{int(time.time()*1000)}"
+
+    async def event_generator():
+        """Generate SSE events."""
+        queue_data = []
+
+        def on_token(delta):
+            queue_data.append(("delta", {"text": delta}))
+
+        def on_tool(name, preview, args, kwargs):
+            queue_data.append(("tool", {
+                "name": name,
+                "preview": preview,
+                "args": args,
+                "duration": kwargs.get("duration"),
+                "is_error": kwargs.get("is_error", False),
+            }))
+
+        def on_complete(response, messages):
+            queue_data.append(("complete", {"response": response}))
+            # Update session
+            with _chat_sessions_lock:
+                if session_id in _chat_sessions:
+                    _chat_sessions[session_id]["messages"] = messages
+                    # Generate title from first exchange
+                    if not _chat_sessions[session_id]["title"]:
+                        user_text = messages[0].get("content", "") if messages else ""
+                        first_line = user_text.strip().split("\n")[0]
+                        _chat_sessions[session_id]["title"] = first_line[:60]
+
+        def on_error(error):
+            queue_data.append(("error", {"message": error}))
+
+        # Import chat stream module
+        try:
+            from hermes_cli.web_chat_api.chat_stream import run_chat_stream
+        except ImportError as e:
+            yield f"event: error\ndata: {json.dumps({'message': f'Chat module not available: {e}'})}\n\n"
+            return
+
+        # Yield initial event
+        yield f"event: start\ndata: {json.dumps({'session_id': session_id, 'stream_id': stream_id})}\n\n"
+
+        # Run chat in background thread
+        import concurrent.futures
+        loop = asyncio.get_event_loop()
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = loop.run_in_executor(
+                executor,
+                lambda: asyncio.run(run_chat_stream(
+                    session_id=session_id,
+                    user_message=body.message,
+                    model=session["model"],
+                    workspace=session["workspace"],
+                    on_token=on_token,
+                    on_tool=on_tool,
+                    on_complete=on_complete,
+                    on_error=on_error,
+                ))
+            )
+
+            # Poll for events
+            while not future.done():
+                while queue_data:
+                    event_type, data = queue_data.pop(0)
+                    yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+                await asyncio.sleep(0.05)
+
+            # Drain remaining events
+            while queue_data:
+                event_type, data = queue_data.pop(0)
+                yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+            # Check for exceptions
+            try:
+                await future
+            except Exception as e:
+                yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+
+        # Final done event
+        yield "event: done\ndata: {}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+@app.post("/api/chat/cancel")
+async def chat_cancel(body: ChatCancel):
+    """Cancel an active chat stream."""
+    from hermes_cli.web_chat_api.chat_stream import cancel_stream
+    result = cancel_stream(body.stream_id)
+    return {"ok": result, "stream_id": body.stream_id}
+
+
+# ---------------------------------------------------------------------------
+# Chat UI SPA endpoint
+# ---------------------------------------------------------------------------
+
+@app.get("/chat")
+async def serve_chat_ui():
+    """Serve the chat UI SPA."""
+    chat_index = WEB_CHAT_DIST / "index.html"
+    if not chat_index.exists():
+        return JSONResponse(
+            {"error": "Chat UI not available. Static files missing."},
+            status_code=404,
+        )
+
+    html = chat_index.read_text(encoding="utf-8")
+    # Inject session token
+    token_script = f'<script>window.__HERMES_SESSION_TOKEN__="{_SESSION_TOKEN}";</script>'
+    html = html.replace("</head>", f"{token_script}</head>", 1)
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/chat/{file_path:path}")
+async def serve_chat_static(file_path: str):
+    """Serve static files for chat UI."""
+    # Prevent path traversal
+    target = WEB_CHAT_DIST / file_path
+    if not target.resolve().is_relative_to(WEB_CHAT_DIST.resolve()):
+        raise HTTPException(status_code=403, detail="Path traversal blocked")
+    if not target.exists() or not target.is_file():
+        # Fall back to index.html for SPA routing
+        return await serve_chat_ui()
+    return FileResponse(target)
+
+
+# ---------------------------------------------------------------------------
 # Log viewer endpoint
 # ---------------------------------------------------------------------------
 
