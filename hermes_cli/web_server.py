@@ -21,6 +21,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -100,6 +101,24 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/dashboard/themes",
     "/api/dashboard/plugins",
     "/api/dashboard/plugins/rescan",
+    "/api/chat/sessions",
+    "/api/chat/stream",
+    "/api/chat/start",
+    "/api/chat/cancel",
+    "/api/chat/stream/status",
+    "/api/session/rename",
+    # Hermes WebUI compatibility stubs (read-only)
+    "/api/profile/active",
+    "/api/settings",
+    "/api/workspaces",
+    "/api/updates/check",
+    "/api/models",
+    "/api/onboarding/status",
+    "/api/sessions",
+    "/api/projects",
+    "/api/skills",
+    "/api/skills/content",
+    "/api/skills/save",
 })
 
 
@@ -1710,6 +1729,684 @@ async def delete_session_endpoint(session_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Chat API endpoints (WebUI integration)
+# ---------------------------------------------------------------------------
+
+# Chat UI static files directory
+WEB_CHAT_DIST = Path(__file__).parent / "web_chat_dist"
+
+# Chat UI state directory (compatible with original Hermes WebUI)
+CHAT_STATE_DIR = Path(os.getenv("HERMES_WEBUI_STATE_DIR", str(Path.home() / ".hermes" / "webui")))
+
+# Chat sessions storage
+_chat_sessions: Dict[str, Dict[str, Any]] = {}
+_chat_sessions_lock = threading.Lock()
+
+# Chat stream queues (stream_id -> asyncio.Queue) for SSE streaming
+_chat_stream_queues: Dict[str, asyncio.Queue] = {}
+_chat_stream_tasks: Dict[str, asyncio.Task] = {}
+_chat_streams_lock = threading.Lock()
+
+
+class ChatMessage(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    model: Optional[str] = None
+    workspace: Optional[str] = None
+
+
+class ChatCancel(BaseModel):
+    stream_id: str
+
+
+# ---------------------------------------------------------------------------
+# Hermes WebUI compatibility stubs
+# These endpoints provide minimal implementations for the Hermes WebUI JavaScript
+# that expects a full Hermes WebUI backend. They return default/empty responses.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/profile/active")
+async def get_active_profile_stub():
+    """Stub for Hermes WebUI profile API - returns default profile."""
+    return {"name": "default", "description": "Default profile (stub)"}
+
+
+@app.get("/api/settings")
+async def get_settings_stub():
+    """Stub for Hermes WebUI settings API - returns settings compatible with original WebUI."""
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+        model_cfg = config.get("model", "")
+        if isinstance(model_cfg, dict):
+            default_model = model_cfg.get("default", "")
+        else:
+            default_model = str(model_cfg) if model_cfg else ""
+
+        # Load workspace from state directory
+        workspace_file = CHAT_STATE_DIR / "last_workspace.txt"
+        default_workspace = ""
+        if workspace_file.exists():
+            default_workspace = workspace_file.read_text().strip()
+        if not default_workspace:
+            default_workspace = str(Path.cwd())
+
+        # Load onboarding status
+        onboarding_file = CHAT_STATE_DIR / "onboarding_completed.json"
+        onboarding_completed = False
+        if onboarding_file.exists():
+            try:
+                data = json.loads(onboarding_file.read_text())
+                onboarding_completed = data.get("completed", False)
+            except:
+                pass
+
+        return {
+            "default_model": default_model,
+            "default_workspace": default_workspace,
+            "onboarding_completed": onboarding_completed,
+            "send_key": "enter",
+            "show_token_usage": False,
+            "show_cli_sessions": False,
+            "sync_to_insights": False,
+            "check_for_updates": False,
+            "theme": "dark",
+            "skin": "default",
+            "language": "en",
+            "bot_name": "Hermes",
+            "sound_enabled": False,
+            "notifications_enabled": False,
+            "bubble_layout": False,
+        }
+    except Exception:
+        return {
+            "default_model": "",
+            "default_workspace": str(Path.cwd()),
+            "onboarding_completed": False,
+            "send_key": "enter",
+            "show_token_usage": False,
+            "show_cli_sessions": False,
+            "sync_to_insights": False,
+            "check_for_updates": False,
+            "theme": "dark",
+            "skin": "default",
+            "language": "en",
+            "bot_name": "Hermes",
+            "sound_enabled": False,
+            "notifications_enabled": False,
+            "bubble_layout": False,
+        }
+
+
+@app.get("/api/workspaces")
+async def list_workspaces_stub():
+    """Stub for Hermes WebUI workspaces API."""
+    return {"workspaces": [], "total": 0}
+
+
+@app.get("/api/updates/check")
+async def check_updates_stub():
+    """Stub for Hermes WebUI updates check API."""
+    return {"webui": {"behind": 0, "current": "1.0.0", "latest": "1.0.0"}, "agent": {"behind": 0}}
+
+
+@app.get("/api/models")
+async def list_models_stub():
+    """Stub for Hermes WebUI models API - returns available models for dropdown."""
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+        default_model = config.get("model", "")
+        if isinstance(default_model, dict):
+            default_model = default_model.get("default", "")
+        return {
+            "groups": [{"provider": "default", "models": [{"id": default_model or "claude-sonnet-4.6", "label": default_model or "Claude Sonnet 4.6"}]}],
+            "default_model": default_model or "claude-sonnet-4.6",
+            "active_provider": None,
+        }
+    except (ImportError, FileNotFoundError, KeyError):
+        return {
+            "groups": [{"provider": "default", "models": [{"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"}]}],
+            "default_model": "claude-sonnet-4.6",
+            "active_provider": None,
+        }
+
+
+@app.get("/api/onboarding/status")
+async def get_onboarding_status_stub():
+    """Stub for Hermes WebUI onboarding status API - returns completed status."""
+    return {"completed": True, "setup": {"providers": [], "current": {}}, "workspaces": {"last": ""}, "settings": {}}
+
+
+@app.get("/api/projects")
+async def list_projects_stub():
+    """Stub for Hermes WebUI projects API - returns empty projects list."""
+    return {"projects": [], "total": 0}
+
+
+@app.post("/api/session/new")
+async def new_session_stub():
+    """Stub for Hermes WebUI session creation - creates a new chat session."""
+    session_id = uuid.uuid4().hex[:12]
+    with _chat_sessions_lock:
+        _chat_sessions[session_id] = {
+            "session_id": session_id,
+            "title": "",
+            "model": "",
+            "workspace": str(Path.cwd()),
+            "messages": [],
+            "created_at": time.time(),
+            "last_active": time.time(),
+        }
+    return {"session_id": session_id, "session": _chat_sessions[session_id]}
+
+
+@app.get("/api/chat/sessions")
+async def list_chat_sessions():
+    """List all chat sessions."""
+    with _chat_sessions_lock:
+        sessions = []
+        for sid, sess in _chat_sessions.items():
+            sessions.append({
+                "session_id": sid,
+                "title": sess.get("title", ""),
+                "model": sess.get("model", ""),
+                "workspace": sess.get("workspace", ""),
+                "message_count": len(sess.get("messages", [])),
+                "created_at": sess.get("created_at"),
+                "last_active": sess.get("last_active"),
+            })
+        return {"sessions": sessions, "total": len(sessions)}
+
+
+@app.get("/api/chat/sessions/{session_id}")
+async def get_chat_session(session_id: str):
+    """Get a specific chat session."""
+    with _chat_sessions_lock:
+        if session_id not in _chat_sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return _chat_sessions[session_id]
+
+
+@app.delete("/api/chat/sessions/{session_id}")
+async def delete_chat_session(session_id: str):
+    """Delete a chat session."""
+    with _chat_sessions_lock:
+        if session_id not in _chat_sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+        del _chat_sessions[session_id]
+        return {"ok": True}
+
+
+@app.get("/api/chat/stream")
+async def chat_stream_get(
+    request: Request,
+    session_id: Optional[str] = None,
+    stream_id: Optional[str] = None,
+):
+    """SSE streaming chat endpoint - GET for connecting to existing stream."""
+    from fastapi.responses import StreamingResponse
+
+    if not stream_id:
+        raise HTTPException(status_code=400, detail="stream_id required")
+
+    # Get queue for this stream
+    with _chat_streams_lock:
+        queue = _chat_stream_queues.get(stream_id)
+        if queue is None:
+            raise HTTPException(status_code=404, detail="Stream not found")
+
+    async def event_generator():
+        """Generate SSE events from queue."""
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                event_type, data = event
+                yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+                if event_type in ("done", "error", "cancel"):
+                    break
+            except asyncio.TimeoutError:
+                yield b": heartbeat\n\n"
+            except asyncio.CancelledError:
+                break
+
+        # Clean up queue after streaming completes
+        with _chat_streams_lock:
+            if stream_id in _chat_stream_queues:
+                del _chat_stream_queues[stream_id]
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+@app.post("/api/chat/start")
+async def chat_start(request: Request, body: ChatMessage):
+    """Start a new chat session and return stream_id for SSE connection."""
+    import uuid
+
+    # Generate IDs
+    session_id = body.session_id or uuid.uuid4().hex[:12]
+    stream_id = uuid.uuid4().hex
+
+    # Get or create session
+    with _chat_sessions_lock:
+        if session_id not in _chat_sessions:
+            _chat_sessions[session_id] = {
+                "session_id": session_id,
+                "messages": [],
+                "model": body.model or "",
+                "workspace": body.workspace or str(Path.cwd()),
+                "title": "",
+                "created_at": time.time(),
+                "last_active": time.time(),
+            }
+        session = _chat_sessions[session_id]
+
+    # Update session
+    session["last_active"] = time.time()
+    if body.model:
+        session["model"] = body.model
+    if body.workspace:
+        session["workspace"] = body.workspace
+
+    # Create event queue for this stream
+    queue: asyncio.Queue = asyncio.Queue()
+    with _chat_streams_lock:
+        _chat_stream_queues[stream_id] = queue
+
+    # Track session data for done event
+    _session_data = {"messages": [], "title": ""}
+
+    # Define event handlers
+    def on_token(delta):
+        try:
+            queue.put_nowait(("delta", {"text": delta}))
+        except asyncio.QueueFull:
+            pass
+
+    def on_tool(name, preview, args, kwargs):
+        try:
+            queue.put_nowait(("tool", {
+                "name": name,
+                "preview": preview,
+                "args": args,
+                "duration": kwargs.get("duration"),
+                "is_error": kwargs.get("is_error", False),
+            }))
+        except asyncio.QueueFull:
+            pass
+
+    def on_complete(response, messages):
+        try:
+            # Build session object with messages for frontend
+            with _chat_sessions_lock:
+                sess = _chat_sessions.get(session_id, {})
+                title = sess.get("title", "")
+                if not title and messages:
+                    user_text = messages[0].get("content", "") if messages else ""
+                    title = user_text.strip().split("\n")[0][:60]
+
+            # Store session data for done event
+            _session_data["messages"] = messages
+            _session_data["title"] = title
+            _session_data["response"] = response
+
+            # Update session
+            with _chat_sessions_lock:
+                if session_id in _chat_sessions:
+                    _chat_sessions[session_id]["messages"] = messages
+                    # Generate title from first exchange
+                    if not _chat_sessions[session_id]["title"]:
+                        user_text = messages[0].get("content", "") if messages else ""
+                        first_line = user_text.strip().split("\n")[0]
+                        _chat_sessions[session_id]["title"] = first_line[:60]
+        except asyncio.QueueFull:
+            pass
+
+    def on_error(error):
+        try:
+            queue.put_nowait(("error", {"message": error}))
+        except asyncio.QueueFull:
+            pass
+
+    # Import and run chat stream in background task
+    try:
+        from hermes_cli.web_chat_api.chat_stream import run_chat_stream
+
+        async def run_background():
+            try:
+                await run_chat_stream(
+                    session_id=session_id,
+                    user_message=body.message,
+                    model=session["model"],
+                    workspace=session["workspace"],
+                    on_token=on_token,
+                    on_tool=on_tool,
+                    on_complete=on_complete,
+                    on_error=on_error,
+                )
+            except Exception as e:
+                try:
+                    queue.put_nowait(("error", {"message": str(e)}))
+                except asyncio.QueueFull:
+                    pass
+            finally:
+                try:
+                    # Send session data in done event (frontend expects d.session)
+                    done_data = {
+                        "session": {
+                            "session_id": session_id,
+                            "messages": _session_data.get("messages", []),
+                            "title": _session_data.get("title", ""),
+                            "model": session.get("model", ""),
+                            "workspace": session.get("workspace", ""),
+                        }
+                    }
+                    if _session_data.get("response"):
+                        done_data["response"] = _session_data["response"]
+                    queue.put_nowait(("done", done_data))
+                except asyncio.QueueFull:
+                    pass
+
+        # Start background task
+        loop = asyncio.get_event_loop()
+        with _chat_streams_lock:
+            _chat_stream_tasks[stream_id] = loop.create_task(run_background())
+
+    except ImportError as e:
+        with _chat_streams_lock:
+            if stream_id in _chat_stream_queues:
+                del _chat_stream_queues[stream_id]
+        raise HTTPException(status_code=500, detail=f"Chat module not available: {e}")
+
+    return {"stream_id": stream_id, "session_id": session_id}
+
+
+@app.post("/api/chat/stream")
+async def chat_stream_post(request: Request, body: ChatMessage):
+    """SSE streaming chat endpoint - POST for starting new chat and streaming in one request (legacy support)."""
+    from fastapi.responses import StreamingResponse
+    import uuid
+
+    # Generate session ID if not provided
+    session_id = body.session_id or uuid.uuid4().hex[:12]
+
+    # Get or create session
+    with _chat_sessions_lock:
+        if session_id not in _chat_sessions:
+            _chat_sessions[session_id] = {
+                "session_id": session_id,
+                "messages": [],
+                "model": body.model or "",
+                "workspace": body.workspace or str(Path.cwd()),
+                "title": "",
+                "created_at": time.time(),
+                "last_active": time.time(),
+            }
+        session = _chat_sessions[session_id]
+
+    # Update session
+    session["last_active"] = time.time()
+    if body.model:
+        session["model"] = body.model
+    if body.workspace:
+        session["workspace"] = body.workspace
+
+    stream_id = f"{session_id}:{int(time.time()*1000)}"
+
+    # Track session data for done event
+    _session_data = {"messages": [], "title": ""}
+
+    async def event_generator():
+        """Generate SSE events."""
+        queue_data = []
+
+        def on_token(delta):
+            queue_data.append(("delta", {"text": delta}))
+
+        def on_tool(name, preview, args, kwargs):
+            queue_data.append(("tool", {
+                "name": name,
+                "preview": preview,
+                "args": args,
+                "duration": kwargs.get("duration"),
+                "is_error": kwargs.get("is_error", False),
+            }))
+
+        def on_complete(response, messages):
+            # Build session object with messages for frontend
+            with _chat_sessions_lock:
+                sess = _chat_sessions.get(session_id, {})
+                title = sess.get("title", "")
+                if not title and messages:
+                    user_text = messages[0].get("content", "") if messages else ""
+                    title = user_text.strip().split("\n")[0][:60]
+
+            # Store session data for done event
+            _session_data["messages"] = messages
+            _session_data["title"] = title
+            _session_data["response"] = response
+
+            # Update session
+            with _chat_sessions_lock:
+                if session_id in _chat_sessions:
+                    _chat_sessions[session_id]["messages"] = messages
+                    # Generate title from first exchange
+                    if not _chat_sessions[session_id]["title"]:
+                        user_text = messages[0].get("content", "") if messages else ""
+                        first_line = user_text.strip().split("\n")[0]
+                        _chat_sessions[session_id]["title"] = first_line[:60]
+
+        def on_error(error):
+            queue_data.append(("error", {"message": error}))
+
+        # Import chat stream module
+        try:
+            from hermes_cli.web_chat_api.chat_stream import run_chat_stream
+        except ImportError as e:
+            yield f"event: error\ndata: {json.dumps({'message': f'Chat module not available: {e}'})}\n\n"
+            return
+
+        # Yield initial event
+        yield f"event: start\ndata: {json.dumps({'session_id': session_id, 'stream_id': stream_id})}\n\n"
+
+        # Run chat in background thread
+        import concurrent.futures
+        loop = asyncio.get_event_loop()
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = loop.run_in_executor(
+                executor,
+                lambda: asyncio.run(run_chat_stream(
+                    session_id=session_id,
+                    user_message=body.message,
+                    model=session["model"],
+                    workspace=session["workspace"],
+                    on_token=on_token,
+                    on_tool=on_tool,
+                    on_complete=on_complete,
+                    on_error=on_error,
+                ))
+            )
+
+            # Poll for events
+            while not future.done():
+                while queue_data:
+                    event_type, data = queue_data.pop(0)
+                    yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+                await asyncio.sleep(0.05)
+
+            # Drain remaining events
+            while queue_data:
+                event_type, data = queue_data.pop(0)
+                yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+            # Check for exceptions
+            try:
+                await future
+            except Exception as e:
+                yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+
+        # Final done event with session data (frontend expects d.session)
+        done_data = {
+            "session": {
+                "session_id": session_id,
+                "messages": _session_data.get("messages", []),
+                "title": _session_data.get("title", ""),
+                "model": session.get("model", ""),
+                "workspace": session.get("workspace", ""),
+            }
+        }
+        if _session_data.get("response"):
+            done_data["response"] = _session_data["response"]
+        yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+@app.get("/api/chat/stream/status")
+async def chat_stream_status(stream_id: Optional[str] = None):
+    """Check if a stream is active."""
+    if not stream_id:
+        return {"active": False, "stream_id": ""}
+    with _chat_streams_lock:
+        is_active = stream_id in _chat_stream_queues
+    return {"active": is_active, "stream_id": stream_id}
+
+
+@app.post("/api/chat/cancel")
+async def chat_cancel(body: ChatCancel):
+    """Cancel an active chat stream."""
+    from hermes_cli.web_chat_api.chat_stream import cancel_stream
+    result = cancel_stream(body.stream_id)
+    return {"ok": result, "stream_id": body.stream_id}
+
+
+class SessionRename(BaseModel):
+    session_id: str
+    title: str
+
+
+@app.post("/api/session/rename")
+async def rename_session(body: SessionRename):
+    """Rename a chat session (Hermes WebUI compatibility)."""
+    # Get session from chat stream sessions or in-memory cache
+    from hermes_cli.web_chat_api.chat_stream import get_session as get_chat_session
+
+    try:
+        session = get_chat_session(body.session_id)
+        if session:
+            session.title = str(body.title).strip()[:80] or "Untitled"
+            return {
+                "session": {
+                    "session_id": session.session_id,
+                    "title": session.title,
+                    "workspace": session.workspace,
+                    "model": session.model,
+                    "created_at": session.created_at,
+                    "last_active": session.last_active,
+                }
+            }
+    except Exception:
+        pass
+
+    # Fallback: store title in CHAT_STATE_DIR for persistence
+    try:
+        title_file = CHAT_STATE_DIR / f"session_{body.session_id}_title.txt"
+        title_file.parent.mkdir(parents=True, exist_ok=True)
+        title_file.write_text(body.title)
+        return {
+            "session": {
+                "session_id": body.session_id,
+                "title": body.title,
+                "workspace": "",
+                "model": "",
+                "created_at": time.time(),
+                "last_active": time.time(),
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to rename session: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Chat UI SPA endpoint
+# ---------------------------------------------------------------------------
+
+@app.get("/chat")
+async def serve_chat_ui():
+    """Serve the chat UI SPA."""
+    chat_index = WEB_CHAT_DIST / "index.html"
+    if not chat_index.exists():
+        return JSONResponse(
+            {"error": "Chat UI not available. Static files missing."},
+            status_code=404,
+        )
+
+    html = chat_index.read_text(encoding="utf-8")
+    # Inject session token
+    token_script = f'<script>window.__HERMES_SESSION_TOKEN__="{_SESSION_TOKEN}";</script>'
+    html = html.replace("</head>", f"{token_script}</head>", 1)
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/chat/static/{file_path:path}")
+async def serve_chat_static_files(file_path: str):
+    """Serve static files for chat UI (maps /chat/static/* to web_chat_dist/*)."""
+    # Prevent path traversal
+    target = WEB_CHAT_DIST / file_path
+    if not target.resolve().is_relative_to(WEB_CHAT_DIST.resolve()):
+        raise HTTPException(status_code=403, detail="Path traversal blocked")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(target, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
+@app.get("/static/{file_path:path}")
+async def serve_chat_static_root(file_path: str):
+    """Serve static files for chat UI at root /static/* path (for base href support)."""
+    # Prevent path traversal
+    target = WEB_CHAT_DIST / file_path
+    if not target.resolve().is_relative_to(WEB_CHAT_DIST.resolve()):
+        raise HTTPException(status_code=403, detail="Path traversal blocked")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(target, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
+@app.get("/chat/{file_path:path}")
+async def serve_chat_static(file_path: str):
+    """Serve other static files for chat UI (excludes /chat/static/* which has dedicated route)."""
+    # Skip paths that start with static/ - they should go to the dedicated route
+    if file_path.startswith("static/"):
+        # This shouldn't happen if routes are ordered correctly, but safety check
+        raise HTTPException(status_code=404, detail="Use /chat/static/ route")
+    # Prevent path traversal
+    target = WEB_CHAT_DIST / file_path
+    if not target.resolve().is_relative_to(WEB_CHAT_DIST.resolve()):
+        raise HTTPException(status_code=403, detail="Path traversal blocked")
+    if not target.exists() or not target.is_file():
+        # Fall back to index.html for SPA routing
+        return await serve_chat_ui()
+    return FileResponse(target)
+
+
+# ---------------------------------------------------------------------------
 # Log viewer endpoint
 # ---------------------------------------------------------------------------
 
@@ -1866,6 +2563,7 @@ class SkillToggle(BaseModel):
 
 @app.get("/api/skills")
 async def get_skills():
+    """Stub for Hermes WebUI skills API - returns skills list compatible with original WebUI."""
     from tools.skills_tool import _find_all_skills
     from hermes_cli.skills_config import get_disabled_skills
     config = load_config()
@@ -1873,7 +2571,7 @@ async def get_skills():
     skills = _find_all_skills(skip_disabled=True)
     for s in skills:
         s["enabled"] = s["name"] not in disabled
-    return skills
+    return {"skills": skills}
 
 
 @app.put("/api/skills/toggle")
