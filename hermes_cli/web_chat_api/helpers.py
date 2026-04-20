@@ -15,7 +15,7 @@ def require(body: dict, *fields) -> None:
 
 def bad(msg, status: int=400) -> dict:
     """Return a clean JSON error response."""
-    return {'error': msg}
+    return {'error': msg, 'status': status}
 
 
 def _sanitize_error(e: Exception) -> str:

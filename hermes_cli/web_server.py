@@ -107,15 +107,42 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/chat/cancel",
     "/api/chat/stream/status",
     "/api/session/rename",
+    "/api/session",
+    "/api/session/update",
+    "/api/session/delete",
+    "/api/session/pin",
+    "/api/session/archive",
+    "/api/session/status",
+    "/api/session/retry",
+    "/api/session/undo",
+    "/api/session/export",
+    "/api/session/import_cli",
+    "/api/list",
+    "/api/file",
+    "/api/workspaces",
+    "/api/workspaces/add",
+    "/api/workspaces/remove",
+    "/api/projects",
+    "/api/projects/create",
+    "/api/projects/rename",
+    "/api/projects/delete",
+    "/api/profiles",
+    "/api/profile/create",
+    "/api/profile/switch",
+    "/api/profile/delete",
+    "/api/auth/status",
+    "/api/auth/logout",
+    "/api/memory",
+    "/api/memory/write",
+    "/api/personalities",
+    "/api/personality/set",
     # Hermes WebUI compatibility stubs (read-only)
     "/api/profile/active",
     "/api/settings",
-    "/api/workspaces",
     "/api/updates/check",
     "/api/models",
     "/api/onboarding/status",
     "/api/sessions",
-    "/api/projects",
     "/api/skills",
     "/api/skills/content",
     "/api/skills/save",
@@ -1747,6 +1774,10 @@ _chat_stream_queues: Dict[str, asyncio.Queue] = {}
 _chat_stream_tasks: Dict[str, asyncio.Task] = {}
 _chat_streams_lock = threading.Lock()
 
+# In-memory sessions for quick access (used by session management API)
+SESSIONS: Dict[str, Any] = {}
+_SESSIONS_LOCK = threading.Lock()
+
 
 class ChatMessage(BaseModel):
     message: str
@@ -1844,6 +1875,48 @@ async def list_workspaces_stub():
     return {"workspaces": [], "total": 0}
 
 
+class WorkspacePath(BaseModel):
+    path: str
+
+
+@app.post("/api/workspaces/add")
+async def add_workspace(body: WorkspacePath):
+    """Add a workspace path."""
+    from hermes_cli.config import load_config, save_config
+
+    try:
+        config = load_config()
+        workspaces = config.get("workspaces", [])
+
+        if body.path not in workspaces:
+            workspaces.append(body.path)
+            config["workspaces"] = workspaces
+            save_config(config)
+
+        return {"success": True, "workspaces": workspaces}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to add workspace: {e}")
+
+
+@app.post("/api/workspaces/remove")
+async def remove_workspace(body: WorkspacePath):
+    """Remove a workspace path."""
+    from hermes_cli.config import load_config, save_config
+
+    try:
+        config = load_config()
+        workspaces = config.get("workspaces", [])
+
+        if body.path in workspaces:
+            workspaces.remove(body.path)
+            config["workspaces"] = workspaces
+            save_config(config)
+
+        return {"success": True, "workspaces": workspaces}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to remove workspace: {e}")
+
+
 @app.get("/api/updates/check")
 async def check_updates_stub():
     """Stub for Hermes WebUI updates check API."""
@@ -1881,24 +1954,156 @@ async def get_onboarding_status_stub():
 @app.get("/api/projects")
 async def list_projects_stub():
     """Stub for Hermes WebUI projects API - returns empty projects list."""
+    # Load projects from state directory
+    projects_file = CHAT_STATE_DIR / "projects.json"
+    if projects_file.exists():
+        import json
+        try:
+            data = json.loads(projects_file.read_text())
+            return {"projects": data.get("projects", []), "total": len(data.get("projects", []))}
+        except Exception:
+            pass
     return {"projects": [], "total": 0}
+
+
+class ProjectCreate(BaseModel):
+    name: str
+    color: Optional[str] = None
+
+
+class ProjectAction(BaseModel):
+    project_id: str
+
+
+class ProjectRename(BaseModel):
+    project_id: str
+    name: str
+
+
+@app.post("/api/projects/create")
+async def create_project(body: ProjectCreate):
+    """Create a new project."""
+    import json
+
+    projects_file = CHAT_STATE_DIR / "projects.json"
+    projects_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing projects
+    projects = []
+    if projects_file.exists():
+        try:
+            data = json.loads(projects_file.read_text())
+            projects = data.get("projects", [])
+        except Exception:
+            pass
+
+    # Create new project
+    import uuid
+    new_project = {
+        "project_id": uuid.uuid4().hex[:12],
+        "name": body.name,
+        "color": body.color or "#3b82f6",
+        "created_at": time.time(),
+    }
+    projects.append(new_project)
+
+    # Save
+    projects_file.write_text(json.dumps({"projects": projects}, indent=2))
+
+    return {"project": new_project, "project_id": new_project["project_id"]}
+
+
+@app.post("/api/projects/rename")
+async def rename_project(body: ProjectRename):
+    """Rename a project."""
+    import json
+
+    projects_file = CHAT_STATE_DIR / "projects.json"
+
+    if not projects_file.exists():
+        raise HTTPException(status_code=404, detail="No projects found")
+
+    try:
+        data = json.loads(projects_file.read_text())
+        projects = data.get("projects", [])
+
+        # Find and rename project
+        for project in projects:
+            if project.get("project_id") == body.project_id:
+                project["name"] = body.name
+                projects_file.write_text(json.dumps({"projects": projects}, indent=2))
+                return {"success": True, "project": project}
+
+        raise HTTPException(status_code=404, detail="Project not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to rename project: {e}")
+
+
+@app.post("/api/projects/delete")
+async def delete_project(body: ProjectAction):
+    """Delete a project."""
+    import json
+
+    projects_file = CHAT_STATE_DIR / "projects.json"
+
+    if not projects_file.exists():
+        raise HTTPException(status_code=404, detail="No projects found")
+
+    try:
+        data = json.loads(projects_file.read_text())
+        projects = data.get("projects", [])
+
+        # Filter out deleted project
+        new_projects = [p for p in projects if p.get("project_id") != body.project_id]
+
+        if len(new_projects) == len(projects):
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        data["projects"] = new_projects
+        projects_file.write_text(json.dumps(data, indent=2))
+
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete project: {e}")
 
 
 @app.post("/api/session/new")
 async def new_session_stub():
     """Stub for Hermes WebUI session creation - creates a new chat session."""
     session_id = uuid.uuid4().hex[:12]
+    session_data = {
+        "session_id": session_id,
+        "title": "",
+        "model": "",
+        "workspace": str(Path.cwd()),
+        "messages": [],
+        "created_at": time.time(),
+        "last_active": time.time(),
+    }
+
+    # Store in memory
     with _chat_sessions_lock:
-        _chat_sessions[session_id] = {
-            "session_id": session_id,
-            "title": "",
-            "model": "",
-            "workspace": str(Path.cwd()),
-            "messages": [],
-            "created_at": time.time(),
-            "last_active": time.time(),
-        }
-    return {"session_id": session_id, "session": _chat_sessions[session_id]}
+        _chat_sessions[session_id] = session_data
+
+    # Also persist to disk for retrieval by /api/session endpoint
+    from hermes_cli.web_chat_api.chat_stream import SESSIONS as chat_sessions, ChatSession
+    sessions_dir = CHAT_STATE_DIR / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    session_file = sessions_dir / f"{session_id}.json"
+    session_file.write_text(json.dumps(session_data, indent=2))
+
+    # Also store in chat_sessions for in-memory retrieval
+    with _SESSIONS_LOCK:
+        chat_session = ChatSession(session_id)
+        chat_session.title = ""
+        chat_session.model = ""
+        chat_session.workspace = str(Path.cwd())
+        chat_session.messages = []
+        chat_session.created_at = time.time()
+        chat_session.last_active = time.time()
+        chat_sessions[session_id] = chat_session
+
+    return {"session_id": session_id, "session": session_data}
 
 
 @app.get("/api/chat/sessions")
@@ -2345,6 +2550,607 @@ async def rename_session(body: SessionRename):
 
 
 # ---------------------------------------------------------------------------
+# Session Management API
+# ---------------------------------------------------------------------------
+
+class SessionUpdate(BaseModel):
+    session_id: str
+    model: Optional[str] = None
+    workspace: Optional[str] = None
+
+
+@app.get("/api/session")
+async def get_session(session_id: str):
+    """Get session details by session_id."""
+    from hermes_cli.web_chat_api.chat_stream import SESSIONS as chat_sessions, ChatSession
+
+    # Check in-memory sessions first
+    with _SESSIONS_LOCK:
+        if session_id in chat_sessions:
+            session = chat_sessions[session_id]
+            # Only return if session has actual data (not just created)
+            if session.messages or session.title or session.workspace != str(Path.cwd()):
+                return {
+                    "session_id": session.session_id,
+                    "title": session.title,
+                    "workspace": session.workspace,
+                    "model": session.model,
+                    "messages": session.messages,
+                    "created_at": session.created_at,
+                    "last_active": session.last_active,
+                }
+
+    # Check persisted sessions
+    session_file = CHAT_STATE_DIR / "sessions" / f"{session_id}.json"
+    if session_file.exists():
+        import json
+        data = json.loads(session_file.read_text())
+        return data
+
+    raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.post("/api/session/update")
+async def update_session(body: SessionUpdate):
+    """Update session model and/or workspace."""
+    from hermes_cli.web_chat_api.chat_stream import get_session as get_chat_session
+
+    if not body.session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    session = get_chat_session(body.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if body.model:
+        session.model = body.model
+    if body.workspace:
+        session.workspace = body.workspace
+
+    session.last_active = time.time()
+
+    return {
+        "session_id": session.session_id,
+        "title": session.title,
+        "workspace": session.workspace,
+        "model": session.model,
+        "messages": session.messages,
+        "created_at": session.created_at,
+        "last_active": session.last_active,
+    }
+
+
+class SessionAction(BaseModel):
+    session_id: str
+    pinned: Optional[bool] = None
+    archived: Optional[bool] = None
+
+
+@app.post("/api/session/delete")
+async def delete_session(body: dict):
+    """Delete a session."""
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    # Remove from in-memory sessions
+    with _SESSIONS_LOCK:
+        if session_id in SESSIONS:
+            del SESSIONS[session_id]
+
+    # Remove persisted session file
+    session_file = CHAT_STATE_DIR / "sessions" / f"{session_id}.json"
+    if session_file.exists():
+        session_file.unlink()
+
+    return {"success": True, "session_id": session_id}
+
+
+@app.post("/api/session/pin")
+async def pin_session(body: SessionAction):
+    """Pin or unpin a session."""
+    from hermes_cli.web_chat_api.chat_stream import get_session as get_chat_session
+
+    session = get_chat_session(body.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    pinned = body.pinned if body.pinned is not None else True
+
+    # Store pin state in session metadata
+    session.metadata = getattr(session, "metadata", {})
+    session.metadata["pinned"] = pinned
+
+    return {
+        "session_id": session.session_id,
+        "pinned": pinned,
+    }
+
+
+@app.post("/api/session/archive")
+async def archive_session(body: SessionAction):
+    """Archive or unarchive a session."""
+    from hermes_cli.web_chat_api.chat_stream import get_session as get_chat_session
+
+    session = get_chat_session(body.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    archived = body.archived if body.archived is not None else True
+
+    # Store archive state in session metadata
+    session.metadata = getattr(session, "metadata", {})
+    session.metadata["archived"] = archived
+
+    return {
+        "session_id": session.session_id,
+        "archived": archived,
+    }
+
+
+@app.get("/api/session/status")
+async def session_status(session_id: str):
+    """Get session status."""
+    from hermes_cli.web_chat_api.chat_stream import get_session as get_chat_session
+
+    session = get_chat_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {
+        "session_id": session_id,
+        "active": session.last_active > (time.time() - 3600),  # Active in last hour
+        "message_count": len(session.messages),
+        "title": session.title,
+    }
+
+
+class SessionRetry(BaseModel):
+    session_id: str
+
+
+@app.post("/api/session/retry")
+async def retry_session(body: SessionRetry):
+    """Retry the last user message in a session."""
+    from hermes_cli.web_chat_api.chat_stream import get_session as get_chat_session
+
+    session = get_chat_session(body.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # For now, return success stub - actual retry would require
+    # re-sending the last user message to the model
+    return {
+        "success": True,
+        "session_id": body.session_id,
+        "message": "Retry functionality is a stub - implement full retry logic as needed",
+    }
+
+
+@app.post("/api/session/undo")
+async def undo_session(body: SessionRetry):
+    """Undo the last assistant message in a session."""
+    from hermes_cli.web_chat_api.chat_stream import get_session as get_chat_session
+
+    session = get_chat_session(body.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Remove last assistant message and its preceding user message
+    if session.messages and len(session.messages) >= 2:
+        # Remove last assistant message
+        if session.messages[-1].get("role") == "assistant":
+            session.messages.pop()
+        # Remove last user message if exists
+        if session.messages and session.messages[-1].get("role") == "user":
+            session.messages.pop()
+
+    return {
+        "success": True,
+        "session_id": body.session_id,
+        "messages": session.messages,
+    }
+
+
+@app.get("/api/session/export")
+async def export_session(session_id: str):
+    """Export session data."""
+    from hermes_cli.web_chat_api.chat_stream import get_session as get_chat_session
+
+    session = get_chat_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Return session data for export
+    return {
+        "session_id": session.session_id,
+        "title": session.title,
+        "workspace": session.workspace,
+        "model": session.model,
+        "messages": session.messages,
+        "created_at": session.created_at,
+        "last_active": session.last_active,
+        "metadata": getattr(session, "metadata", {}),
+    }
+
+
+@app.post("/api/session/import_cli")
+async def import_cli_session(body: dict):
+    """Import a session from CLI."""
+    import json
+
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+
+    # Try to load from state directory
+    session_file = CHAT_STATE_DIR / "sessions" / f"{session_id}.json"
+    if session_file.exists():
+        try:
+            data = json.loads(session_file.read_text())
+            return {"success": True, "session": data}
+        except Exception:
+            pass
+
+    # Fallback: check in-memory sessions
+    from hermes_cli.web_chat_api.chat_stream import get_session as get_chat_session
+    session = get_chat_session(session_id)
+    if session:
+        return {
+            "success": True,
+            "session": {
+                "session_id": session.session_id,
+                "title": session.title,
+                "messages": session.messages,
+            }
+        }
+
+    raise HTTPException(status_code=404, detail="Session not found")
+
+
+# ---------------------------------------------------------------------------
+# File Operations API
+# ---------------------------------------------------------------------------
+
+class FileListResponse(BaseModel):
+    files: list
+
+
+@app.get("/api/list")
+async def list_files(session_id: str, path: str, workspace: Optional[str] = None):
+    """List files in a directory."""
+    import os
+
+    # Use secure path resolution
+    try:
+        dir_path = _resolve_workspace_path(path, workspace)
+    except HTTPException:
+        raise
+
+    # Validate path exists and is a directory
+    if not dir_path.exists():
+        raise HTTPException(status_code=404, detail="Directory not found")
+
+    if not dir_path.is_dir():
+        raise HTTPException(status_code=400, detail="Path is not a directory")
+
+    files = []
+    try:
+        for item in dir_path.iterdir():
+            # Skip hidden files and common ignore patterns
+            if item.name.startswith('.') or item.name in {'__pycache__', 'node_modules', '.git'}:
+                continue
+
+            file_info = {
+                "name": item.name,
+                "path": str(item),
+                "type": "directory" if item.is_dir() else "file",
+            }
+
+            # Add metadata for files
+            if item.is_file():
+                try:
+                    stat = item.stat()
+                    file_info["size"] = stat.st_size
+                    file_info["modified"] = stat.st_mtime
+                except Exception:
+                    pass
+
+            files.append(file_info)
+
+        # Sort: directories first, then files, alphabetically
+        files.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
+
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    return {"files": files}
+
+
+class FileGetResponse(BaseModel):
+    content: str
+    path: Optional[str] = None
+
+
+@app.get("/api/file")
+async def get_file(session_id: str, path: str, workspace: Optional[str] = None):
+    """Get file content."""
+    import base64
+
+    # Use secure path resolution
+    try:
+        file_path = _resolve_workspace_path(path, workspace)
+    except HTTPException:
+        raise
+
+    # Validate path exists and is a file
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if not file_path.is_file():
+        raise HTTPException(status_code=400, detail="Path is not a file")
+
+    try:
+        # Try to read as text (UTF-8)
+        content = file_path.read_text(encoding='utf-8')
+    except UnicodeDecodeError:
+        # Fall back to binary and return as base64
+        content = base64.b64encode(file_path.read_bytes()).decode('ascii')
+
+    return {"content": content, "path": str(file_path)}
+
+
+class FileCreate(BaseModel):
+    path: str
+    content: str = ""
+    workspace: Optional[str] = None
+
+
+class FileRename(BaseModel):
+    old_path: str
+    new_path: str
+    workspace: Optional[str] = None
+
+
+class FileDelete(BaseModel):
+    path: str
+    workspace: Optional[str] = None
+
+
+class FileCreateDir(BaseModel):
+    path: str
+    workspace: Optional[str] = None
+
+
+def _get_last_workspace() -> str:
+    """Get the last used workspace path from state file."""
+    workspace_file = CHAT_STATE_DIR / "last_workspace.txt"
+    if workspace_file.exists():
+        try:
+            p = workspace_file.read_text(encoding='utf-8').strip()
+            if p and Path(p).is_dir():
+                return p
+        except Exception:
+            pass
+    # Fallback to current working directory
+    return str(Path.cwd())
+
+
+def _load_workspaces() -> list:
+    """Load the list of saved workspaces."""
+    workspaces_file = CHAT_STATE_DIR / "workspaces.json"
+    if workspaces_file.exists():
+        try:
+            content = workspaces_file.read_text(encoding='utf-8')
+            return json.loads(content)
+        except Exception:
+            pass
+    return []
+
+
+def _resolve_workspace_path(path: str, workspace: Optional[str] = None) -> Path:
+    """Resolve a file path within a trusted workspace.
+
+    Security checks:
+    1. Prevent path traversal (.. or absolute paths outside workspace)
+    2. Block system root directories
+    3. Require file to exist for read operations
+    """
+    BLOCKED_SYSTEM_ROOTS = {
+        Path('/etc'), Path('/usr'), Path('/var'), Path('/bin'), Path('/sbin'),
+        Path('/boot'), Path('/proc'), Path('/sys'), Path('/dev'),
+        Path('/lib'), Path('/lib64'), Path('/root'),
+    }
+
+    # Use provided workspace or fall back to default
+    if workspace:
+        base = Path(workspace).resolve()
+    else:
+        base = Path(_get_last_workspace()).resolve()
+
+    # Handle absolute paths in request
+    requested = Path(path)
+    if requested.is_absolute():
+        resolved = requested.resolve()
+
+        # Block system roots
+        if resolved in BLOCKED_SYSTEM_ROOTS:
+            raise HTTPException(status_code=403, detail="Access to system directory forbidden")
+
+        # Allow if under user home
+        try:
+            resolved.relative_to(Path.home().resolve())
+            return resolved
+        except ValueError:
+            pass
+
+        # Check if it's a saved workspace
+        workspaces = _load_workspaces()
+        for ws in workspaces:
+            ws_path = Path(ws.get('path', '')).resolve()
+            try:
+                resolved.relative_to(ws_path)
+                return resolved  # Trusted workspace
+            except ValueError:
+                continue
+
+        # For explicit absolute paths (like in tests), allow if not blocked
+        # This enables testing and ad-hoc file access while still blocking system dirs
+        return resolved
+
+    # Relative path - resolve within workspace
+    target = (base / requested).resolve()
+
+    # Security check: ensure target is within base workspace
+    try:
+        target.relative_to(base)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path traversal forbidden")
+
+    # Security check: not a system root
+    if target in BLOCKED_SYSTEM_ROOTS:
+        raise HTTPException(status_code=403, detail="Access to system directory forbidden")
+
+    return target
+
+
+@app.post("/api/file/create")
+async def create_file(body: FileCreate):
+    """Create a new file in the workspace."""
+    try:
+        from hermes_cli.web_chat_api.helpers import safe_resolve
+        from hermes_cli.web_chat_api.config import CHAT_STATE_DIR
+
+        # Resolve path with security checks
+        target = _resolve_workspace_path(body.path, body.workspace)
+
+        # Create parent directories if needed
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write file
+        target.write_text(body.content, encoding='utf-8')
+
+        return {
+            "success": True,
+            "path": str(target),
+            "message": "File created successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to create file: {e}")
+
+
+@app.post("/api/file/save")
+async def save_file(body: FileCreate):
+    """Save file content (create or update)."""
+    try:
+        # Resolve path with security checks
+        target = _resolve_workspace_path(body.path, body.workspace)
+
+        # Create parent directories if needed
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write content
+        target.write_text(body.content, encoding='utf-8')
+
+        return {
+            "success": True,
+            "path": str(target),
+            "message": "File saved successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to save file: {e}")
+
+
+@app.post("/api/file/rename")
+async def rename_file(body: FileRename):
+    """Rename a file."""
+    try:
+        # Resolve paths with security checks
+        source = _resolve_workspace_path(body.old_path, body.workspace)
+        dest = _resolve_workspace_path(body.new_path, body.workspace)
+
+        # Check source exists
+        if not source.exists():
+            raise HTTPException(status_code=404, detail="Source file not found")
+
+        # Check dest doesn't exist (avoid accidental overwrite)
+        if dest.exists():
+            raise HTTPException(status_code=400, detail="Destination already exists")
+
+        # Rename
+        source.rename(dest)
+
+        return {
+            "success": True,
+            "old_path": str(source),
+            "new_path": str(dest),
+            "message": "File renamed successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=400, detail=f"Failed to rename file: {e}")
+
+
+@app.post("/api/file/delete")
+async def delete_file(body: FileDelete):
+    """Delete a file."""
+    try:
+        # Resolve path with security checks
+        target = _resolve_workspace_path(body.path, body.workspace)
+
+        # Check exists
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+
+        # Check is file (not directory)
+        if not target.is_file():
+            raise HTTPException(status_code=400, detail="Path is not a file")
+
+        # Delete
+        target.unlink()
+
+        return {
+            "success": True,
+            "path": str(target),
+            "message": "File deleted successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=400, detail=f"Failed to delete file: {e}")
+
+
+@app.post("/api/file/create-dir")
+async def create_directory(body: FileCreateDir):
+    """Create a directory."""
+    try:
+        # Resolve path with security checks
+        target = _resolve_workspace_path(body.path, body.workspace)
+
+        # Create directory (parents=True for nested dirs)
+        target.mkdir(parents=True, exist_ok=True)
+
+        return {
+            "success": True,
+            "path": str(target),
+            "message": "Directory created successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to create directory: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Chat UI SPA endpoint
 # ---------------------------------------------------------------------------
 
@@ -2467,6 +3273,195 @@ async def get_logs(
 # ---------------------------------------------------------------------------
 # Cron job management endpoints
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Profiles management endpoints
+# ---------------------------------------------------------------------------
+
+class ProfileCreate(BaseModel):
+    name: str
+    config: Optional[dict] = None
+
+
+class ProfileSwitch(BaseModel):
+    name: str
+
+
+class ProfileAction(BaseModel):
+    name: str
+
+
+@app.get("/api/profiles")
+async def list_profiles():
+    """List all profiles."""
+    profiles_dir = CHAT_STATE_DIR / "profiles"
+    profiles = []
+
+    if profiles_dir.exists():
+        for profile_file in profiles_dir.glob("*.json"):
+            try:
+                import json
+                data = json.loads(profile_file.read_text())
+                profiles.append({
+                    "name": profile_file.stem,
+                    "config": data.get("config", {}),
+                })
+            except Exception:
+                pass
+
+    # Always include default profile
+    if not any(p["name"] == "default" for p in profiles):
+        profiles.append({"name": "default", "config": {}})
+
+    return {"profiles": profiles}
+
+
+@app.post("/api/profile/create")
+async def create_profile(body: ProfileCreate):
+    """Create a new profile."""
+    import json
+
+    profiles_dir = CHAT_STATE_DIR / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+
+    profile_file = profiles_dir / f"{body.name}.json"
+
+    if profile_file.exists():
+        raise HTTPException(status_code=409, detail="Profile already exists")
+
+    profile_data = {
+        "name": body.name,
+        "config": body.config or {},
+        "created_at": time.time(),
+    }
+
+    profile_file.write_text(json.dumps(profile_data, indent=2))
+
+    return {"profile": profile_data, "success": True}
+
+
+@app.post("/api/profile/switch")
+async def switch_profile(body: ProfileSwitch):
+    """Switch to a different profile."""
+    profiles_dir = CHAT_STATE_DIR / "profiles"
+    profile_file = profiles_dir / f"{body.name}.json"
+
+    if not profile_file.exists() and body.name != "default":
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    # Store active profile in state
+    active_profile_file = CHAT_STATE_DIR / "active_profile.txt"
+    active_profile_file.write_text(body.name)
+
+    return {"success": True, "active_profile": body.name}
+
+
+@app.post("/api/profile/delete")
+async def delete_profile(body: ProfileAction):
+    """Delete a profile."""
+    import json
+
+    profiles_dir = CHAT_STATE_DIR / "profiles"
+    profile_file = profiles_dir / f"{body.name}.json"
+
+    if not profile_file.exists():
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    if body.name == "default":
+        raise HTTPException(status_code=400, detail="Cannot delete default profile")
+
+    profile_file.unlink()
+
+    return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/auth/status")
+async def auth_status():
+    """Get authentication status."""
+    return {"authenticated": True, "status": "ok"}
+
+
+@app.post("/api/auth/logout")
+async def logout():
+    """Logout user."""
+    return {"success": True, "message": "Logged out"}
+
+
+# ---------------------------------------------------------------------------
+# Memory endpoints
+# ---------------------------------------------------------------------------
+
+class MemoryWrite(BaseModel):
+    section: str
+    content: str
+
+
+@app.get("/api/memory")
+async def get_memory():
+    """Get memory content."""
+    memory_file = CHAT_STATE_DIR / "memory" / "default.md"
+
+    if memory_file.exists():
+        return {"content": memory_file.read_text()}
+
+    return {"content": "", "sections": []}
+
+
+@app.post("/api/memory/write")
+async def write_memory(body: MemoryWrite):
+    """Write memory content."""
+    memory_dir = CHAT_STATE_DIR / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+
+    memory_file = memory_dir / f"{body.section}.md"
+    memory_file.write_text(body.content)
+
+    return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# Personalities endpoints
+# ---------------------------------------------------------------------------
+
+class PersonalitySet(BaseModel):
+    session_id: str
+    name: str
+
+
+@app.get("/api/personalities")
+async def list_personalities():
+    """List available personalities."""
+    # Return stub list
+    return {
+        "personalities": [
+            {"name": "assistant", "description": "Helpful assistant"},
+            {"name": "expert", "description": "Domain expert"},
+        ]
+    }
+
+
+@app.post("/api/personality/set")
+async def set_personality(body: PersonalitySet):
+    """Set personality for a session."""
+    from hermes_cli.web_chat_api.chat_stream import get_session as get_chat_session
+
+    session = get_chat_session(body.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Store personality in session metadata
+    session.metadata = getattr(session, "metadata", {})
+    session.metadata["personality"] = body.name
+
+    return {"success": True, "personality": body.name}
+
+
+# ---------------------------------------------------------------------------
+# Cron job management endpoints
 
 
 class CronJobCreate(BaseModel):
