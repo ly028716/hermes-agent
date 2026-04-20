@@ -1922,9 +1922,21 @@ async def serve_chat_ui():
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
+@app.get("/chat/static/{file_path:path}")
+async def serve_chat_static_files(file_path: str):
+    """Serve static files for chat UI (maps /chat/static/* to web_chat_dist/*)."""
+    # Prevent path traversal
+    target = WEB_CHAT_DIST / file_path
+    if not target.resolve().is_relative_to(WEB_CHAT_DIST.resolve()):
+        raise HTTPException(status_code=403, detail="Path traversal blocked")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(target)
+
+
 @app.get("/chat/{file_path:path}")
 async def serve_chat_static(file_path: str):
-    """Serve static files for chat UI."""
+    """Serve other static files for chat UI."""
     # Prevent path traversal
     target = WEB_CHAT_DIST / file_path
     if not target.resolve().is_relative_to(WEB_CHAT_DIST.resolve()):
