@@ -83,19 +83,6 @@ def resolve_model_provider(model_str: str) -> tuple:
     return model_str, None, None
 
 
-def get_default_model() -> str:
-    """Get default model from Hermes config."""
-    try:
-        from hermes_cli.config import load_config
-        config = load_config()
-        model_cfg = config.get('model', '')
-        if isinstance(model_cfg, dict):
-            return model_cfg.get('default', model_cfg.get('name', ''))
-        return str(model_cfg) if model_cfg else ''
-    except Exception:
-        return ''
-
-
 def get_toolsets_for_chat() -> list:
     """Get enabled toolsets for chat sessions."""
     try:

@@ -59,12 +59,6 @@ def set_stream_complete(stream_id: str) -> None:
     from hermes_cli.web_chat_api.config import set_stream_complete as _set_complete
     _set_complete(stream_id)
 
-# Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
-# concurrent runs of the SAME session, but two DIFFERENT sessions can still
-# interleave their os.environ writes. This global lock serializes the env
-# save/restore around the entire agent run.
-_ENV_LOCK = threading.Lock()
-
 # Lazy import to avoid circular deps -- hermes-agent is on sys.path via api/config.py
 try:
     from run_agent import AIAgent
@@ -1451,7 +1445,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
 # ============================================================
 
 
-def cancel_stream(stream_id: str) -> bool:
+def cancel_stream_request(stream_id: str) -> bool:
     """Signal an in-flight stream to cancel. Returns True if the stream existed."""
     with STREAMS_LOCK:
         if stream_id not in STREAMS:
