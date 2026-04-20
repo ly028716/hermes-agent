@@ -20,6 +20,7 @@ LOCK = threading.Lock()
 STREAMS: Dict[str, Any] = {}
 STREAMS_LOCK = threading.Lock()
 CANCEL_FLAGS: Dict[str, threading.Event] = {}
+COMPLETED_STREAMS: set = set()  # Track completed streams
 AGENT_INSTANCES: Dict[str, Any] = {}
 
 # Per-session agent locks
@@ -106,6 +107,19 @@ def get_toolsets_for_chat() -> list:
         return []
 
 
+def get_default_model() -> str:
+    """Get default model from Hermes config."""
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+        model_cfg = config.get('model', '')
+        if isinstance(model_cfg, dict):
+            return model_cfg.get('default', model_cfg.get('name', ''))
+        return str(model_cfg) if model_cfg else ''
+    except Exception:
+        return ''
+
+
 def get_hermes_home() -> Path:
     """Get HERMES_HOME directory."""
     try:
@@ -131,3 +145,29 @@ def restore_hermes_home() -> None:
     if _HERMES_HOME_STACK:
         prev = _HERMES_HOME_STACK.pop()
         os.environ["HERMES_HOME"] = prev
+
+
+# Stream creation and management helpers
+def create_stream(stream_id: str) -> None:
+    """Create a new stream queue for the given stream ID."""
+    import queue
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = queue.Queue()
+
+
+def set_stream_complete(stream_id: str) -> None:
+    """Mark a stream as complete."""
+    with STREAMS_LOCK:
+        if stream_id in STREAMS:
+            STREAMS[stream_id].put(None)  # Sentinel value
+        COMPLETED_STREAMS.add(stream_id)
+
+
+def get_stream_status(stream_id: str) -> dict:
+    """Get the current status of a stream."""
+    with STREAMS_LOCK:
+        if stream_id not in STREAMS:
+            return {"stream_id": stream_id, "status": "not_found"}
+        if stream_id in COMPLETED_STREAMS:
+            return {"stream_id": stream_id, "status": "completed"}
+        return {"stream_id": stream_id, "status": "running"}

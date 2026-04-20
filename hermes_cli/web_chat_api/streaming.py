@@ -25,6 +25,39 @@ from hermes_cli.web_chat_api.config import (
     save_hermes_home, restore_hermes_home, get_hermes_home,
 )
 from hermes_cli.web_chat_api.helpers import redact_session_data
+from hermes_cli.web_chat_api.config import create_stream as _create_stream
+
+# Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
+# concurrent runs of the SAME session, but two DIFFERENT sessions can still
+# interleave their os.environ writes. This global lock serializes the env
+# save/restore around the entire agent run.
+_ENV_LOCK = threading.Lock()
+
+
+# Wrapper functions for testability
+def create_stream(stream_id: str) -> None:
+    """Create a new stream queue for the given stream ID."""
+    _create_stream(stream_id)
+
+
+def cancel_stream(stream_id: str) -> None:
+    """Cancel a running stream by setting the cancellation flag."""
+    with STREAMS_LOCK:
+        if stream_id not in CANCEL_FLAGS:
+            CANCEL_FLAGS[stream_id] = threading.Event()
+    CANCEL_FLAGS[stream_id].set()
+
+
+def get_stream_status(stream_id: str) -> dict:
+    """Get the current status of a stream."""
+    from hermes_cli.web_chat_api.config import get_stream_status as _get_status
+    return _get_status(stream_id)
+
+
+def set_stream_complete(stream_id: str) -> None:
+    """Mark a stream as complete."""
+    from hermes_cli.web_chat_api.config import set_stream_complete as _set_complete
+    _set_complete(stream_id)
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
