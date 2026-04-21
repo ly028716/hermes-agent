@@ -1779,6 +1779,30 @@ SESSIONS: Dict[str, Any] = {}
 _SESSIONS_LOCK = threading.Lock()
 
 
+def _load_chat_sessions_from_disk():
+    """Load persisted chat sessions from disk into memory on startup."""
+    sessions_dir = CHAT_STATE_DIR / "sessions"
+    if not sessions_dir.exists():
+        return
+
+    with _chat_sessions_lock:
+        for session_file in sessions_dir.glob("*.json"):
+            try:
+                session_data = json.loads(session_file.read_text())
+                session_id = session_data.get("session_id")
+                if session_id:
+                    _chat_sessions[session_id] = session_data
+                    _log.debug(f"Loaded chat session: {session_id}")
+            except Exception as e:
+                _log.warning(f"Failed to load session {session_file.name}: {e}")
+
+    _log.info(f"Loaded {len(_chat_sessions)} chat sessions from disk")
+
+
+# Load sessions on module import
+_load_chat_sessions_from_disk()
+
+
 class ChatMessage(BaseModel):
     message: str
     session_id: Optional[str] = None
