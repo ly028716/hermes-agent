@@ -74,6 +74,7 @@ _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 # User-managed env files should override stale shell exports on restart.
 from hermes_constants import get_hermes_home, display_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
+from utils import base_url_host_matches
 
 _hermes_home = get_hermes_home()
 _project_env = Path(__file__).parent / '.env'
@@ -1836,7 +1837,7 @@ class HermesCLI:
         # Match key to resolved base_url: OpenRouter URL → prefer OPENROUTER_API_KEY,
         # custom endpoint → prefer OPENAI_API_KEY (issue #560).
         # Note: _ensure_runtime_credentials() re-resolves this before first use.
-        if self.base_url and "openrouter.ai" in self.base_url:
+        if self.base_url and base_url_host_matches(self.base_url, "openrouter.ai"):
             self.api_key = api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
         else:
             self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")
@@ -4996,7 +4997,7 @@ class HermesCLI:
                 pass
 
         cache_enabled = (
-            ("openrouter" in (result.base_url or "").lower() and "claude" in result.new_model.lower())
+            (base_url_host_matches(result.base_url or "", "openrouter.ai") and "claude" in result.new_model.lower())
             or result.api_mode == "anthropic_messages"
         )
         if cache_enabled:
@@ -5224,7 +5225,7 @@ class HermesCLI:
 
         # Cache notice
         cache_enabled = (
-            ("openrouter" in (result.base_url or "").lower() and "claude" in result.new_model.lower())
+            (base_url_host_matches(result.base_url or "", "openrouter.ai") and "claude" in result.new_model.lower())
             or result.api_mode == "anthropic_messages"
         )
         if cache_enabled:
@@ -5252,6 +5253,30 @@ class HermesCLI:
             base = text.split(None, 1)[0].lower().lstrip('/')
             cmd = resolve_command(base)
             return bool(cmd and cmd.name == "model")
+        except Exception:
+            return False
+
+    def _should_handle_steer_command_inline(self, text: str, has_images: bool = False) -> bool:
+        """Return True when /steer should be dispatched immediately while the agent is running.
+
+        /steer MUST bypass the normal _pending_input → process_loop path when
+        the agent is active, because process_loop is blocked inside
+        self.chat() for the duration of the run.  By the time the queued
+        command is pulled from _pending_input, _agent_running has already
+        flipped back to False, and process_command() takes the idle
+        fallback — delivering the steer as a next-turn message instead of
+        injecting it mid-run.  Dispatching inline on the UI thread calls
+        agent.steer() directly, which is thread-safe (uses _pending_steer_lock).
+        """
+        if not text or has_images or not _looks_like_slash_command(text):
+            return False
+        if not getattr(self, "_agent_running", False):
+            return False
+        try:
+            from hermes_cli.commands import resolve_command
+            base = text.split(None, 1)[0].lower().lstrip('/')
+            cmd = resolve_command(base)
+            return bool(cmd and cmd.name == "steer")
         except Exception:
             return False
 
@@ -9064,6 +9089,17 @@ class HermesCLI:
                         self._should_exit = True
                         if event.app.is_running:
                             event.app.exit()
+                    event.app.current_buffer.reset(append_to_history=True)
+                    return
+
+                # Handle /steer while the agent is running immediately on the
+                # UI thread.  Queuing through _pending_input would deadlock the
+                # steer until after the agent loop finishes (process_loop is
+                # blocked inside self.chat()), which turns /steer into a
+                # post-run next-turn message — defeating mid-run injection.
+                # agent.steer() is thread-safe (holds _pending_steer_lock).
+                if self._should_handle_steer_command_inline(text, has_images=has_images):
+                    self.process_command(text)
                     event.app.current_buffer.reset(append_to_history=True)
                     return
 
