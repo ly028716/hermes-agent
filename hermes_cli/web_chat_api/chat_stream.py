@@ -276,6 +276,17 @@ async def run_chat_stream(
                     user_text = session.messages[0].get('content', '')
                     session.title = title_from(user_text, final_response)
 
+                # Persist to disk using models.py
+                try:
+                    from hermes_cli.web_chat_api.session_adapter import save_session_after_chat
+                    save_session_after_chat(
+                        session_id=session_id,
+                        messages=session.messages,
+                        title=session.title
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to persist session {session_id}: {e}")
+
                 if on_complete:
                     on_complete(final_response, session.messages)
             else:

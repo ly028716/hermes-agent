@@ -2094,77 +2094,47 @@ async def delete_project(body: ProjectAction):
 @app.post("/api/session/new")
 async def new_session_stub():
     """Stub for Hermes WebUI session creation - creates a new chat session."""
-    session_id = uuid.uuid4().hex[:12]
-    session_data = {
-        "session_id": session_id,
-        "title": "",
-        "model": "",
-        "workspace": str(Path.cwd()),
-        "messages": [],
-        "created_at": time.time(),
-        "last_active": time.time(),
-    }
+    from hermes_cli.web_chat_api.session_adapter import create_session_handler
 
-    # Store in memory
-    with _chat_sessions_lock:
-        _chat_sessions[session_id] = session_data
+    # Create persistent session
+    session = create_session_handler(
+        title="",
+        workspace=str(Path.cwd()),
+        model=""
+    )
 
-    # Also persist to disk for retrieval by /api/session endpoint
-    from hermes_cli.web_chat_api.chat_stream import SESSIONS as chat_sessions, ChatSession
-    sessions_dir = CHAT_STATE_DIR / "sessions"
-    sessions_dir.mkdir(parents=True, exist_ok=True)
-    session_file = sessions_dir / f"{session_id}.json"
-    session_file.write_text(json.dumps(session_data, indent=2))
-
-    # Also store in chat_sessions for in-memory retrieval
-    with _SESSIONS_LOCK:
-        chat_session = ChatSession(session_id)
-        chat_session.title = ""
-        chat_session.model = ""
-        chat_session.workspace = str(Path.cwd())
-        chat_session.messages = []
-        chat_session.created_at = time.time()
-        chat_session.last_active = time.time()
-        chat_sessions[session_id] = chat_session
-
-    return {"session_id": session_id, "session": session_data}
+    return {"session_id": session["session_id"], "session": session}
 
 
 @app.get("/api/chat/sessions")
 async def list_chat_sessions():
     """List all chat sessions."""
-    with _chat_sessions_lock:
-        sessions = []
-        for sid, sess in _chat_sessions.items():
-            sessions.append({
-                "session_id": sid,
-                "title": sess.get("title", ""),
-                "model": sess.get("model", ""),
-                "workspace": sess.get("workspace", ""),
-                "message_count": len(sess.get("messages", [])),
-                "created_at": sess.get("created_at"),
-                "last_active": sess.get("last_active"),
-            })
-        return {"sessions": sessions, "total": len(sessions)}
+    from hermes_cli.web_chat_api.session_adapter import list_sessions_handler
+
+    sessions = list_sessions_handler(limit=100)
+    return {"sessions": sessions, "total": len(sessions)}
 
 
 @app.get("/api/chat/sessions/{session_id}")
 async def get_chat_session(session_id: str):
     """Get a specific chat session."""
-    with _chat_sessions_lock:
-        if session_id not in _chat_sessions:
-            raise HTTPException(status_code=404, detail="Session not found")
-        return _chat_sessions[session_id]
+    from hermes_cli.web_chat_api.session_adapter import get_session_endpoint_handler
+
+    session = get_session_endpoint_handler(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
 
 
 @app.delete("/api/chat/sessions/{session_id}")
 async def delete_chat_session(session_id: str):
     """Delete a chat session."""
-    with _chat_sessions_lock:
-        if session_id not in _chat_sessions:
-            raise HTTPException(status_code=404, detail="Session not found")
-        del _chat_sessions[session_id]
-        return {"ok": True}
+    from hermes_cli.web_chat_api.session_adapter import delete_session_handler
+
+    success = delete_session_handler(session_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"ok": True}
 
 
 @app.get("/api/chat/stream")
@@ -2585,32 +2555,15 @@ class SessionUpdate(BaseModel):
 @app.get("/api/session")
 async def get_session(session_id: str):
     """Get session details by session_id."""
-    from hermes_cli.web_chat_api.chat_stream import SESSIONS as chat_sessions, ChatSession
+    from hermes_cli.web_chat_api.session_adapter import get_session_endpoint_handler
 
-    # Check in-memory sessions first
-    with _SESSIONS_LOCK:
-        if session_id in chat_sessions:
-            session = chat_sessions[session_id]
-            # Only return if session has actual data (not just created)
-            if session.messages or session.title or session.workspace != str(Path.cwd()):
-                return {
-                    "session_id": session.session_id,
-                    "title": session.title,
-                    "workspace": session.workspace,
-                    "model": session.model,
-                    "messages": session.messages,
-                    "created_at": session.created_at,
-                    "last_active": session.last_active,
-                }
+    # Use persistent storage
+    session = get_session_endpoint_handler(session_id)
 
-    # Check persisted sessions
-    session_file = CHAT_STATE_DIR / "sessions" / f"{session_id}.json"
-    if session_file.exists():
-        import json
-        data = json.loads(session_file.read_text())
-        return data
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
 
-    raise HTTPException(status_code=404, detail="Session not found")
+    return session
 
 
 @app.post("/api/session/update")
