@@ -2446,42 +2446,41 @@ async def chat_stream_post(request: Request, body: ChatMessage):
         # Yield initial event
         yield f"event: start\ndata: {json.dumps({'session_id': session_id, 'stream_id': stream_id})}\n\n"
 
-        # Run chat in background thread
-        import concurrent.futures
-        loop = asyncio.get_event_loop()
+        # Run chat stream directly in current event loop (no nested loops)
+        try:
+            # Create task for chat stream
+            chat_task = asyncio.create_task(run_chat_stream(
+                session_id=session_id,
+                user_message=body.message,
+                model=session["model"],
+                workspace=session["workspace"],
+                on_token=on_token,
+                on_tool=on_tool,
+                on_complete=on_complete,
+                on_error=on_error,
+            ))
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = loop.run_in_executor(
-                executor,
-                lambda: asyncio.run(run_chat_stream(
-                    session_id=session_id,
-                    user_message=body.message,
-                    model=session["model"],
-                    workspace=session["workspace"],
-                    on_token=on_token,
-                    on_tool=on_tool,
-                    on_complete=on_complete,
-                    on_error=on_error,
-                ))
-            )
-
-            # Poll for events
-            while not future.done():
+            # Stream events as they arrive
+            while not chat_task.done():
+                # Yield any queued events
                 while queue_data:
                     event_type, data = queue_data.pop(0)
                     yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+                # Small delay to allow other tasks to run
                 await asyncio.sleep(0.05)
 
-            # Drain remaining events
+            # Wait for task completion and handle any exceptions
+            await chat_task
+
+            # Drain any remaining events
             while queue_data:
                 event_type, data = queue_data.pop(0)
                 yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
-            # Check for exceptions
-            try:
-                await future
-            except Exception as e:
-                yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+        except Exception as e:
+            logger.exception(f"Chat stream error: {e}")
+            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
 
         # Final done event with session data (frontend expects d.session)
         done_data = {

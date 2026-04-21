@@ -211,35 +211,59 @@ async def run_chat_stream(
                 on_error("Cancelled by user")
             return
 
-        # Run conversation (synchronous, runs in thread)
-        result_queue = queue.Queue()
+        # Run conversation in thread pool without blocking event loop
+        loop = asyncio.get_event_loop()
 
         def _run_agent():
+            """Run agent synchronously in thread."""
             try:
                 result = agent.run_conversation(user_message)
-                result_queue.put(('success', result))
+                return ('success', result)
             except Exception as e:
-                result_queue.put(('error', str(e)))
+                logger.exception(f"Agent execution error: {e}")
+                return ('error', str(e))
 
-        agent_thread = threading.Thread(target=_run_agent, daemon=True)
-        agent_thread.start()
+        # Execute agent in thread pool with timeout (default 10 minutes)
+        timeout_seconds = int(os.environ.get('HERMES_CHAT_TIMEOUT', '600'))
 
-        # Wait for result or cancel
-        while agent_thread.is_alive():
-            if cancel_event.is_set():
-                try:
-                    agent.interrupt("Cancelled by user")
-                except Exception:
-                    pass
-                agent_thread.join(timeout=5)
-                if on_error:
-                    on_error("Cancelled by user")
-                return
-            agent_thread.join(timeout=0.1)
-
-        # Get result
         try:
-            status, result = result_queue.get(timeout=1)
+            # Run in executor without blocking event loop
+            future = loop.run_in_executor(None, _run_agent)
+
+            # Wait with timeout and periodic cancel checks
+            start_time = time.time()
+            while not future.done():
+                # Check for cancellation
+                if cancel_event.is_set():
+                    try:
+                        agent.interrupt("Cancelled by user")
+                    except Exception:
+                        pass
+                    # Wait briefly for graceful shutdown
+                    try:
+                        await asyncio.wait_for(asyncio.shield(future), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        pass
+                    if on_error:
+                        on_error("Cancelled by user")
+                    return
+
+                # Check for timeout
+                if time.time() - start_time > timeout_seconds:
+                    try:
+                        agent.interrupt("Execution timeout")
+                    except Exception:
+                        pass
+                    if on_error:
+                        on_error(f"Execution timeout ({timeout_seconds}s)")
+                    return
+
+                # Sleep without blocking event loop
+                await asyncio.sleep(0.1)
+
+            # Get result
+            status, result = await future
+
             if status == 'success':
                 final_response = result.get('final_response', '')
 
@@ -257,9 +281,11 @@ async def run_chat_stream(
             else:
                 if on_error:
                     on_error(result)
-        except queue.Empty:
+
+        except Exception as e:
+            logger.exception(f"Agent execution wrapper error: {e}")
             if on_error:
-                on_error("Agent timeout")
+                on_error(str(e))
 
     except Exception as e:
         logger.exception(f"Chat stream error: {e}")
