@@ -17,6 +17,48 @@ from hermes_cli.web_chat_api.config import CHAT_STATE_DIR
 logger = logging.getLogger(__name__)
 
 
+def _to_api_format(session: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert internal session format to API response format.
+
+    Args:
+        session: Internal session dict from models.py
+
+    Returns:
+        Session dict in API response format
+    """
+    return {
+        "session_id": session["session_id"],
+        "title": session.get("title", ""),
+        "workspace": session.get("workspace", ""),
+        "model": session.get("model", ""),
+        "messages": session.get("messages", []),
+        "created_at": session.get("created_at", 0),
+        "last_active": session.get("updated_at", 0),  # Map updated_at to last_active
+    }
+
+
+def _to_list_format(session: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert internal session format to list item format.
+
+    Args:
+        session: Internal session dict from models.py
+
+    Returns:
+        Session dict in list format (without full messages)
+    """
+    return {
+        "session_id": session["session_id"],
+        "title": session.get("title", ""),
+        "workspace": session.get("workspace", ""),
+        "model": session.get("model", ""),
+        "message_count": len(session.get("messages", [])),
+        "created_at": session.get("created_at", 0),
+        "last_active": session.get("updated_at", 0),
+    }
+
+
 def get_session_endpoint_handler(
     session_id: str,
     state_dir: Optional[Path] = None
@@ -39,16 +81,7 @@ def get_session_endpoint_handler(
     if session is None:
         return None
 
-    # Convert to API response format
-    return {
-        "session_id": session["session_id"],
-        "title": session.get("title", ""),
-        "workspace": session.get("workspace", ""),
-        "model": session.get("model", ""),
-        "messages": session.get("messages", []),
-        "created_at": session.get("created_at", 0),
-        "last_active": session.get("updated_at", 0),  # Map updated_at to last_active
-    }
+    return _to_api_format(session)
 
 
 def list_sessions_handler(
@@ -86,15 +119,7 @@ def list_sessions_handler(
             session_id = session_file.stem
             session = models.get_session(session_id, state_dir=state_dir)
             if session:
-                sessions.append({
-                    "session_id": session["session_id"],
-                    "title": session.get("title", ""),
-                    "workspace": session.get("workspace", ""),
-                    "model": session.get("model", ""),
-                    "message_count": len(session.get("messages", [])),
-                    "created_at": session.get("created_at", 0),
-                    "last_active": session.get("updated_at", 0),
-                })
+                sessions.append(_to_list_format(session))
         except Exception as e:
             logger.warning(f"Failed to load session {session_file}: {e}")
             continue
@@ -128,15 +153,7 @@ def create_session_handler(
         state_dir=state_dir
     )
 
-    return {
-        "session_id": session["session_id"],
-        "title": session["title"],
-        "workspace": session["workspace"],
-        "model": session["model"],
-        "messages": session["messages"],
-        "created_at": session["created_at"],
-        "last_active": session["updated_at"],
-    }
+    return _to_api_format(session)
 
 
 def update_session_handler(
@@ -161,15 +178,7 @@ def update_session_handler(
     if session is None:
         return None
 
-    return {
-        "session_id": session["session_id"],
-        "title": session.get("title", ""),
-        "workspace": session.get("workspace", ""),
-        "model": session.get("model", ""),
-        "messages": session.get("messages", []),
-        "created_at": session.get("created_at", 0),
-        "last_active": session.get("updated_at", 0),
-    }
+    return _to_api_format(session)
 
 
 def delete_session_handler(
