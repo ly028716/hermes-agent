@@ -1075,6 +1075,7 @@ document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;wrap.class
 let _settingsDirty = false;
 let _settingsThemeOnOpen = null; // track theme at open time for discard revert
 let _settingsSkinOnOpen = null; // track skin at open time for discard revert
+let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 
 function switchSettingsSection(name){
@@ -1198,6 +1199,10 @@ function _markSettingsDirty(){
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
+    // Populate the version badge from the server — keeps it in sync with git
+    // tags automatically without any manual release step.
+    const vbadge=document.querySelector('.settings-version-badge');
+    if(vbadge && settings.webui_version) vbadge.textContent=settings.webui_version;
     // Hydrate appearance controls first so a slow /api/models request
     // cannot overwrite an in-progress theme/skin selection.
     const themeSel=$('settingsTheme');
@@ -1220,9 +1225,10 @@ async function loadSettingsPanel(){
     const modelSel=$('settingsModel');
     if(modelSel){
       modelSel.innerHTML='';
+      let models=null;
       try{
-        const models=await api('/api/models');
-        for(const g of (models.groups||[])){
+        models=await api('/api/models');
+        for(const g of ((models||{}).groups||[])){
           const og=document.createElement('optgroup');
           og.label=g.provider;
           for(const m of g.models){
@@ -1233,7 +1239,8 @@ async function loadSettingsPanel(){
           modelSel.appendChild(og);
         }
       }catch(e){}
-      modelSel.value=settings.default_model||'';
+      _settingsHermesDefaultModelOnOpen=(models&&models.default_model)||'';
+      modelSel.value=_settingsHermesDefaultModelOnOpen;
       modelSel.addEventListener('change',_markSettingsDirty,{once:false});
     }
     // Send key preference
@@ -1265,8 +1272,11 @@ async function loadSettingsPanel(){
     if(soundCb){soundCb.checked=!!settings.sound_enabled;soundCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const notifCb=$('settingsNotificationsEnabled');
     if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_markSettingsDirty,{once:false});}
-    const bubbleCb=$('settingsBubbleLayout');
-    if(bubbleCb){bubbleCb.checked=!!settings.bubble_layout;bubbleCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    const sidebarDensitySel=$('settingsSidebarDensity');
+    if(sidebarDensitySel){
+      sidebarDensitySel.value=settings.sidebar_density==='detailed'?'detailed':'compact';
+      sidebarDensitySel.addEventListener('change',_markSettingsDirty,{once:false});
+    }
     // Bot name
     const botNameField=$('settingsBotName');
     if(botNameField){botNameField.value=settings.bot_name||'Hermes';botNameField.addEventListener('input',_markSettingsDirty,{once:false});}
@@ -1293,14 +1303,14 @@ function _setSettingsAuthButtonsVisible(active){
 }
 
 function _applySavedSettingsUi(saved, body, opts){
-  const {sendKey,showTokenUsage,showCliSessions,theme,skin,language}=opts;
+  const {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
   window._showCliSessions=showCliSessions;
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;
+  window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._botName=body.bot_name||'Hermes';
-  document.body.classList.toggle('bubble-layout', !!body.bubble_layout);
   if(typeof applyBotName==='function') applyBotName();
   if(typeof setLocale==='function') setLocale(language);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
@@ -1314,6 +1324,7 @@ function _applySavedSettingsUi(saved, body, opts){
   _settingsSkinOnOpen=skin||'default';
   const bar=$('settingsUnsavedBar');
   if(bar) bar.style.display='none';
+  _settingsHermesDefaultModelOnOpen=body.default_model||_settingsHermesDefaultModelOnOpen||'';
   renderMessages();
   if(typeof syncTopbar==='function') syncTopbar();
   if(typeof renderSessionList==='function') renderSessionList();
@@ -1321,6 +1332,7 @@ function _applySavedSettingsUi(saved, body, opts){
 
 async function saveSettings(andClose){
   const model=($('settingsModel')||{}).value;
+  const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'');
   const sendKey=($('settingsSendKey')||{}).value;
   const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
@@ -1328,8 +1340,8 @@ async function saveSettings(andClose){
   const theme=($('settingsTheme')||{}).value||'dark';
   const skin=($('settingsSkin')||{}).value||'default';
   const language=($('settingsLanguage')||{}).value||'en';
+  const sidebarDensity=($('settingsSidebarDensity')||{}).value==='detailed'?'detailed':'compact';
   const body={};
-  if(model) body.default_model=model;
 
   if(sendKey) body.send_key=sendKey;
   body.theme=theme;
@@ -1341,15 +1353,22 @@ async function saveSettings(andClose){
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
-  body.bubble_layout=!!($('settingsBubbleLayout')||{}).checked;
-  document.body.classList.toggle('bubble-layout', body.bubble_layout);
+  body.sidebar_density=sidebarDensity;
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     try{
       const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({...body,_set_password:pw.trim()})});
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language});
+      if(modelChanged && model){
+        try{
+          await api('/api/default-model',{method:'POST',body:JSON.stringify({model})});
+          body.default_model=model;
+        }catch(_modelErr){
+          if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
+        }
+      }
+      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       _hideSettingsPanel();
       return;
@@ -1357,7 +1376,15 @@ async function saveSettings(andClose){
   }
   try{
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language});
+    if(modelChanged && model){
+      try{
+        await api('/api/default-model',{method:'POST',body:JSON.stringify({model})});
+        body.default_model=model;
+      }catch(_modelErr){
+        if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
+      }
+    }
+    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity});
     showToast(t('settings_saved'));
     _hideSettingsPanel();
   }catch(e){

@@ -454,9 +454,16 @@ $('msg').addEventListener('input',()=>{
   updateSendBtn();
   const text=$('msg').value;
   if(text.startsWith('/')&&text.indexOf('\n')===-1){
-    const prefix=text.slice(1);
-    const matches=getMatchingCommands(prefix);
-    if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+    if(typeof getSlashAutocompleteMatches==='function'){
+      getSlashAutocompleteMatches(text).then(matches=>{
+        if(($('msg').value||'')!==text) return;
+        if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+      });
+    }else{
+      const prefix=text.slice(1);
+      const matches=getMatchingCommands(prefix);
+      if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+    }
     if(typeof ensureSkillCommandsLoadedForAutocomplete==='function') ensureSkillCommandsLoadedForAutocomplete();
   } else {
     hideCmdDropdown();
@@ -757,13 +764,13 @@ function applyBotName(){
     window._showCliSessions=!!s.show_cli_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
+    window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._botName=s.bot_name||'Hermes';
     const appearance=_normalizeAppearance(s.theme,s.skin);
     localStorage.setItem('hermes-theme',appearance.theme);
     _applyTheme(appearance.theme);
     localStorage.setItem('hermes-skin',appearance.skin);
     _applySkin(appearance.skin);
-    document.body.classList.toggle('bubble-layout',!!s.bubble_layout);
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
         ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'))
@@ -778,9 +785,9 @@ function applyBotName(){
     window._showCliSessions=false;
     window._soundEnabled=false;
     window._notificationsEnabled=false;
+    window._sidebarDensity='compact';
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
-    document.body.classList.remove('bubble-layout');
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
         ? resolvePreferredLocale(null, localStorage.getItem('hermes-lang'))

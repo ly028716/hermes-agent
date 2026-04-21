@@ -226,7 +226,6 @@
       </div>
     </div>
     <div class="composer-wrap" id="composerWrap">
-      <div class="cmd-dropdown" id="cmdDropdown"></div>
       <div class="composer-flyout">
       <div class="approval-card" id="approvalCard" role="alertdialog" aria-labelledby="approvalHeading" aria-describedby="approvalDesc">
         <div class="approval-inner">
@@ -275,6 +274,7 @@
       </div>
       </div>
       <div class="composer-box" id="composerBox">
+        <div class="cmd-dropdown" id="cmdDropdown"></div>
         <div class="drop-hint" id="dropHint">
           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           Drop files to upload to workspace
@@ -555,11 +555,12 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_token_usage">Displays input/output token count below each assistant reply. Also toggled with <code>/usage</code>.</div>
             </div>
             <div class="settings-field">
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-                <input type="checkbox" id="settingsBubbleLayout" style="width:15px;height:15px;accent-color:var(--accent)">
-                <span data-i18n="settings_label_bubble_layout">Chat bubble layout</span>
-              </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_bubble_layout">Right-align user messages and left-align assistant replies. Off by default to keep code blocks and tool output full-width.</div>
+              <label for="settingsSidebarDensity" data-i18n="settings_label_sidebar_density">Sidebar density</label>
+              <select id="settingsSidebarDensity" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="compact" data-i18n="settings_sidebar_density_compact">Compact</option>
+                <option value="detailed" data-i18n="settings_sidebar_density_detailed">Detailed</option>
+              </select>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sidebar_density">Controls how much metadata the session list shows in the left sidebar.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -595,7 +596,7 @@
                 <div class="settings-section-title">System</div>
                 <div class="settings-section-meta">Instance version and access controls.</div>
               </div>
-              <span class="settings-version-badge">v0.50.87</span>
+              <span class="settings-version-badge">—</span>
             </div>
             <div class="settings-field" style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px">
               <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>

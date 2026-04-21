@@ -2,10 +2,12 @@ async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,location.href);
-  // Add Authorization header with session token for Hermes Agent auth
+  // Inject session token for authentication
+  const headers = {'Content-Type':'application/json', ...opts.headers};
   const token = window.__HERMES_SESSION_TOKEN__;
-  const headers = {'Content-Type':'application/json', ...(opts.headers||{})};
-  if (token) headers['Authorization'] = 'Bearer ' + token;
+  if (token && !headers['Authorization']) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
   const res=await fetch(url.href,{credentials:'include',headers,...opts});
   if(!res.ok){
     const text=await res.text();
