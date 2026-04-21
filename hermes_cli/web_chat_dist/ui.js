@@ -473,13 +473,19 @@ function getModelLabel(modelId){
 }
 
 function _stripXmlToolCallsDisplay(s){
-  // Strip <function_calls>...</function_calls> blocks emitted by DeepSeek and
-  // similar models in their raw response text.  These are processed separately
-  // as tool calls; leaving them in the content causes them to render visibly
-  // in the settled chat bubble.  (#702)
-  if(!s||s.toLowerCase().indexOf('<function_calls>')===-1) return s;
+  // Strip <function_calls>...</function_calls> and <tool_call>...</tool_call> blocks
+  // emitted by DeepSeek and similar models in their raw response text.
+  // These are processed separately as tool calls; leaving them in the content
+  // causes them to render visibly in the settled chat bubble.  (#702)
+  if(!s) return s;
+  const hasToolCalls = s.toLowerCase().indexOf('<function_calls>') !== -1 || s.toLowerCase().indexOf('<tool_call>') !== -1;
+  if(!hasToolCalls) return s;
+  // Remove complete <function_calls> blocks
   s=s.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi,'');
   s=s.replace(/<function_calls>[\s\S]*$/i,'');
+  // Remove complete <tool_call> blocks
+  s=s.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi,'');
+  s=s.replace(/<tool_call>[\s\S]*$/i,'');
   return s.trim();
 }
 
