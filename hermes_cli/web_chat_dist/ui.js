@@ -10,14 +10,23 @@ function _getSessionQueue(sid, create=false){
 function queueSessionMessage(sid, payload){
   if(!sid||!payload) return 0;
   const q=_getSessionQueue(sid,true);
-  q.push(payload);
+  // Stamp created_at so the restore path can detect stale entries (agent already responded)
+  const entry={...payload, _queued_at: Date.now()};
+  q.push(entry);
+  // Persist to sessionStorage so the queue survives page refresh
+  try{ sessionStorage.setItem('hermes-queue-'+sid, JSON.stringify(q)); }catch(_){}
   return q.length;
 }
 function shiftQueuedSessionMessage(sid){
   const q=_getSessionQueue(sid,false);
   if(!q.length) return null;
   const next=q.shift();
-  if(!q.length) delete SESSION_QUEUES[sid];
+  if(!q.length){
+    delete SESSION_QUEUES[sid];
+    try{ sessionStorage.removeItem('hermes-queue-'+sid); }catch(_){}
+  } else {
+    try{ sessionStorage.setItem('hermes-queue-'+sid, JSON.stringify(q)); }catch(_){}
+  }
   return next;
 }
 function getQueuedSessionCount(sid){
@@ -646,17 +655,36 @@ function renderMd(raw){
     }
     return `<span class="katex-inline" data-katex="inline">${esc(item.src)}</span>`;
   });
+  // Stash rendered <pre> blocks (with optional pre-header div) and mermaid/katex
+  // divs before paragraph splitting so \n inside code blocks is never replaced
+  // with <br>. Token \x00E (next free after B D F G L M C O A).
+  // Fixes #745: code blocks collapse to single line when not preceded by blank line.
+  const _pre_stash=[];
+  s=s.replace(/(<div class="pre-header">[\s\S]*?<\/div>)?<pre>[\s\S]*?<\/pre>|<div class="(mermaid-block|katex-block)"[\s\S]*?<\/div>/g,m=>{
+    _pre_stash.push(m);
+    return '\x00E'+(_pre_stash.length-1)+'\x00';
+  });
   const parts=s.split(/\n{2,}/);
-  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
+  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)|^\x00E/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
+  s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
     const ref=media_stash[+i];
     // HTTP(S) URL
     if(/^https?:\/\//i.test(ref)){
-      if(_IMAGE_EXTS.test(ref.split('?')[0])){
-        return `<img class="msg-media-img" src="${esc(ref)}" alt="image" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+      // Rewrite localhost/127.0.0.1 to the actual server base URL so remote
+      // users (VPN, Docker, deployed) can load agent-generated images (#642).
+      // Strip the trailing slash from document.baseURI so the URL's own path
+      // joins cleanly — this preserves any subpath mount (e.g. /hermes/).
+      let src=ref;
+      if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
+        const base=document.baseURI.replace(/\/$/,'');
+        src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
       }
-      return `<a href="${esc(ref)}" target="_blank" rel="noopener">${esc(ref)}</a>`;
+      if(_IMAGE_EXTS.test(src.split('?')[0])){
+        return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+      }
+      return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
     const apiUrl='api/media?path='+encodeURIComponent(ref);
@@ -1338,6 +1366,25 @@ function _compressionReferenceCardHtml(text, open=false){
       
     </div>`;
 }
+function _isSameLocalDay(dateA, dateB){
+  return dateA.getFullYear()===dateB.getFullYear()
+    && dateA.getMonth()===dateB.getMonth()
+    && dateA.getDate()===dateB.getDate();
+}
+function _formatMessageFooterTimestamp(tsVal){
+  if(!tsVal) return '';
+  const date=new Date(tsVal*1000);
+  const now=new Date();
+  if(_isSameLocalDay(date, now)){
+    return date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  }
+  return date.toLocaleString([], {
+    month:'short',
+    day:'numeric',
+    hour:'numeric',
+    minute:'2-digit',
+  });
+}
 function _compressionStatusCardHtml({
   statusLabel,
   previewText,
@@ -1409,6 +1456,13 @@ function renderMessages(){
     if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) visWithIdx.push({m,rawIdx});
     rawIdx++;
   }
+  let lastUserRawIdx=-1;
+  for(let i=visWithIdx.length-1;i>=0;i--){
+    if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
+      lastUserRawIdx=visWithIdx[i].rawIdx;
+      break;
+    }
+  }
   const insertionAnchor=_compressionAnchorIndex(
     visWithIdx,
     compressionState ? compressionState.anchorMessageKey : sessionCompressionAnchorKey,
@@ -1471,14 +1525,15 @@ function renderMessages(){
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">${li('paperclip',12)} ${esc(f)}</div>`).join('')}</div>`;
     }
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
-    const editBtn  = isUser  ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
+    const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
     const tsTitle=tsVal?new Date(tsVal*1000).toLocaleString():'';
-    const tsTime=tsVal?new Date(tsVal*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'';
-    const userTimeHtml = (isUser && tsTime) ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
-    const footHtml = `<div class="msg-foot">${userTimeHtml}<span class="msg-actions">${editBtn}${copyBtn}${retryBtn}</span></div>`;
+    const tsTime=_formatMessageFooterTimestamp(tsVal);
+    const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${copyBtn}${retryBtn}</span></div>`;
 
     if(isUser){
       currentAssistantTurn=null;
@@ -1677,21 +1732,26 @@ function renderMessages(){
       if(anchorRow&&lastInsertedNode) anchorInsertAfter.set(anchorRow, lastInsertedNode);
     }
   }
-  // Render usage badge on the last assistant turn (if enabled and usage data exists)
+  // Render cumulative usage on the last assistant footer row (if enabled).
   if(window._showTokenUsage&&S.session&&(S.session.input_tokens||S.session.output_tokens)){
     const rows=inner.querySelectorAll('.assistant-turn');
     let lastAssist=null;
     for(let i=rows.length-1;i>=0;i--){lastAssist=rows[i];break;}
-    if(lastAssist&&!lastAssist.querySelector('.msg-usage')){
-      const usage=document.createElement('div');
-      usage.className='msg-usage';
-      const inTok=S.session.input_tokens||0;
-      const outTok=S.session.output_tokens||0;
-      const cost=S.session.estimated_cost;
-      let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
-      if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
-      usage.textContent=text;
-      _assistantTurnBlocks(lastAssist).appendChild(usage);
+    if(lastAssist){
+      const footerRows=lastAssist.querySelectorAll('.msg-foot');
+      const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
+      if(targetFoot&&!targetFoot.querySelector('.msg-usage-inline')){
+        const usage=document.createElement('span');
+        usage.className='msg-usage-inline';
+        const inTok=S.session.input_tokens||0;
+        const outTok=S.session.output_tokens||0;
+        const cost=S.session.estimated_cost;
+        let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
+        if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+        usage.textContent=text;
+        targetFoot.classList.add('msg-foot-with-usage');
+        targetFoot.insertBefore(usage, targetFoot.firstChild);
+      }
     }
   }
   // Only force-scroll when not actively streaming — mid-stream re-renders
@@ -2045,7 +2105,7 @@ function renderKatexBlocks(){
 
 function _thinkingMarkup(text=''){
   return (text&&String(text).trim())
-    ? `<div class="thinking-card open"><div class="thinking-card-header"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span></div><div class="thinking-card-body"><pre>${esc(String(text).trim())}</pre></div></div>`
+    ? `<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(text).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function finalizeThinkingCard(){

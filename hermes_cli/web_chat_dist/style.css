@@ -186,6 +186,8 @@
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
   .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
   .session-item.active .session-title{color:var(--accent-text);}
+  .session-meta{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .session-item.active .session-meta{color:var(--accent-text);opacity:.8;}
   .session-time{display:none;}
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
@@ -436,17 +438,6 @@
   @media(min-width:1800px){.messages-inner{max-width:1200px;}}
   .msg-row{padding:10px 0;}
   .msg-row+.msg-row{border-top:none;}
-  /* Bubble layout (issue #336): opt-in chat-bubble look with user messages right-aligned
-     and assistant messages left-aligned. Uses :has() to tag rows by role without JS
-     changes. Full-width by default -- enabled via body.bubble-layout from settings. */
-  body.bubble-layout .msg-row:has(.msg-role.user){align-self:flex-end;max-width:75%;}
-  body.bubble-layout .msg-row:has(.msg-role.user) .msg-body{padding-left:0;padding-right:30px;max-width:none;}
-  body.bubble-layout .msg-row:has(.msg-role.user) .msg-role{flex-direction:row-reverse;}
-  body.bubble-layout .msg-row:has(.msg-role.assistant){align-self:flex-start;max-width:75%;}
-  @media(max-width:700px){
-    body.bubble-layout .msg-row:has(.msg-role.user),
-    body.bubble-layout .msg-row:has(.msg-role.assistant){max-width:92%;}
-  }
   .msg-role{font-size:12px;font-weight:500;letter-spacing:.01em;margin-bottom:8px;display:flex;align-items:center;gap:8px;}
   .msg-role.user{color:var(--accent);}
   .msg-role.assistant{color:var(--accent-text);opacity:.6;}
@@ -660,6 +651,7 @@
     .rightpanel{display:none}
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
     .mobile-close-btn{display:flex;}
+    .close-preview{display:none;}
     #btnCollapseWorkspacePanel{display:none;}
   }
 
@@ -825,12 +817,15 @@
 .profile-card-meta{font-size:11px;color:var(--muted);margin-top:3px;padding-left:12px;}
 .profile-card-actions{display:flex;gap:4px;flex-shrink:0;}
 /* ── Slash command autocomplete dropdown ── */
-.cmd-dropdown{display:none;position:absolute;bottom:100%;left:0;right:0;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -8px 24px rgba(0,0,0,.4);z-index:200;max-height:240px;overflow-y:auto;margin-bottom:4px;}
+.cmd-dropdown{display:none;position:absolute;left:0;right:0;bottom:calc(100% + 4px);width:auto;max-width:100%;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -8px 24px rgba(0,0,0,.4);z-index:200;max-height:240px;overflow-y:auto;}
 .cmd-dropdown.open{display:block;}
 .cmd-item{padding:8px 14px;cursor:pointer;transition:background .12s;}
-.cmd-item:hover,.cmd-item.selected{background:rgba(255,255,255,.07);}
+.cmd-item:hover{background:rgba(255,255,255,.07);}
+.cmd-item.selected{background:var(--accent-bg);outline:1px solid var(--accent-bg-strong);}
 .cmd-item-head{display:flex;align-items:center;justify-content:space-between;gap:10px;}
 .cmd-item-name{font-size:13px;color:var(--text);font-weight:500;}
+.cmd-item-parent{color:var(--muted);font-weight:400;}
+.cmd-item-subarg{font-weight:600;}
 .cmd-item-arg{color:var(--muted);font-weight:400;font-style:italic;}
 .cmd-item-desc{font-size:11px;color:var(--muted);margin-top:1px;}
 .cmd-item-badge{flex-shrink:0;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 6px;border-radius:999px;border:1px solid var(--border2);color:var(--muted);background:var(--hover-bg);}
@@ -1543,17 +1538,15 @@ body.resizing{user-select:none;cursor:col-resize;}
   --user-bubble-bg: var(--accent);
   --user-bubble-border: var(--accent-hover);
   --user-bubble-text: #fff;
+  --user-bubble-placeholder: rgba(255,255,255,.7);
 }
-/* Dark mode: bright accents need dark text for contrast */
+/* Dark mode: keep user bubbles dark; skin remains a tint via border/fill. */
 :root.dark {
-  --user-bubble-text: #1a1a2a;
+  --user-bubble-bg: var(--accent-bg-strong);
+  --user-bubble-border: var(--accent-bg-strong);
+  --user-bubble-text: var(--text);
+  --user-bubble-placeholder: var(--muted);
 }
-:root.dark[data-skin="ares"] { --user-bubble-text: #1a1a2a; }
-:root.dark[data-skin="mono"] { --user-bubble-text: #1a1a2a; }
-:root.dark[data-skin="slate"] { --user-bubble-text: #0f172a; }
-:root.dark[data-skin="poseidon"] { --user-bubble-text: #0a1628; }
-:root.dark[data-skin="sisyphus"] { --user-bubble-text: #1a1a2a; }
-:root.dark[data-skin="charizard"] { --user-bubble-text: #1a1a2a; }
 
 /* Inline code: stop shouting orange; inherit strong text colour instead */
 .msg-body code { color: var(--strong); background: var(--code-inline-bg); font-size: 12.5px; }
@@ -1613,15 +1606,8 @@ body.resizing{user-select:none;cursor:col-resize;}
 .msg-row[data-role="user"] .msg-body code { color: var(--user-bubble-text); background: rgba(0,0,0,.1); }
 .msg-row[data-role="user"] .msg-body a { color: var(--user-bubble-text); text-decoration: underline; }
 .msg-row[data-role="user"] .msg-files { padding-left: 0; margin-left: 0; justify-content: flex-end; }
-.msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); color: var(--user-bubble-text); box-shadow: 0 0 0 3px rgba(255,255,255,.15); }
-.msg-row[data-role="user"][data-editing="1"] .msg-edit-area::placeholder { color: rgba(255,255,255,.5); }
-
-/* Bubble-layout mode: user-card stays intact, just drop the rail margin.
-   (:has() form matches the existing bubble-layout rule's specificity so this
-   wins by source order rather than relying on !important.) */
-body.bubble-layout .msg-row:has(.msg-role.user) .msg-body { margin-left: 0; padding: 10px 14px; max-width: none; }
-body.bubble-layout .msg-row:has(.msg-role.user) .msg-files { margin-left: 0; padding-left: 0; }
-body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; padding-top: 10px; margin-top: 0; }
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); color: var(--user-bubble-text); box-shadow: 0 0 0 3px var(--focus-ring); }
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area::placeholder { color: var(--user-bubble-placeholder); }
 
 /* Turn boundary: right alignment already separates user turns — keep only vertical spacing */
 .msg-row + .msg-row[data-role="user"] {
@@ -1642,6 +1628,27 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
 }
 .msg-foot .msg-actions { opacity: 1; margin-left: 0; }
 .msg-foot .msg-time { font-size: 10.5px; opacity: .75; }
+.msg-foot-with-usage {
+  justify-content: flex-start;
+  gap: 8px;
+}
+.msg-usage-inline {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: .7;
+  flex: 0 0 auto;
+}
+.msg-foot-with-usage .msg-time,
+.msg-foot-with-usage .msg-actions {
+  opacity: 0;
+  transition: opacity .15s;
+}
+.msg-foot-with-usage .msg-time {
+  margin-left: 4px;
+}
+.msg-foot-with-usage .msg-actions {
+  margin-left: 2px;
+}
 
 /* User footer: visible only on row hover (bubble identifies sender without needing persistent chrome) */
 .msg-row[data-role="user"] .msg-foot {
@@ -1658,11 +1665,24 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
   justify-content: flex-start;
   padding-left: var(--msg-rail);
   max-width: var(--msg-max);
-  opacity: .45;
+  opacity: 0;
   transition: opacity .15s;
 }
 .msg-row[data-role="assistant"]:hover .msg-foot,
-.assistant-turn:hover .msg-foot { opacity: 1; }
+.assistant-turn:hover .msg-foot,
+.assistant-turn:focus-within .msg-foot { opacity: 1; }
+.assistant-turn .msg-foot-with-usage,
+.msg-row[data-role="assistant"] .msg-foot-with-usage {
+  opacity: 1;
+}
+.assistant-turn:hover .msg-foot-with-usage .msg-time,
+.assistant-turn:hover .msg-foot-with-usage .msg-actions,
+.assistant-turn:focus-within .msg-foot-with-usage .msg-time,
+.assistant-turn:focus-within .msg-foot-with-usage .msg-actions,
+.msg-row[data-role="assistant"]:hover .msg-foot-with-usage .msg-time,
+.msg-row[data-role="assistant"]:hover .msg-foot-with-usage .msg-actions {
+  opacity: 1;
+}
 
 /* Hide footer while editing to keep the edit bar the only footer-level affordance */
 .msg-row[data-editing="1"] .msg-foot { display: none; }
@@ -1684,7 +1704,7 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
   border-color: var(--accent-hover);
   background: var(--accent-bg);
 }
-.thinking-card-header { padding: 5px 10px; color: var(--accent-text); font-size: 12px; font-weight: 600; opacity: .85; }
+.thinking-card-header { display:flex; align-items:center; gap:8px; padding: 5px 10px; color: var(--accent-text); font-size: 12px; font-weight: 600; opacity: .85; }
 .thinking-card-header:hover { opacity: 1; }
 .thinking-card-icon { opacity: .7; }
 .thinking-card-body {

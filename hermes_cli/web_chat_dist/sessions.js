@@ -83,6 +83,44 @@ async function loadSession(sid){
       attachLiveStream(sid, activeStreamId, data.session.pending_attachments||[], {reconnecting:true});
     }
   }else{
+    // Restore any queued message that survived page refresh via sessionStorage.
+    // Only restore when the agent is idle — if active, the done handler drains it.
+    if(typeof queueSessionMessage==='function'){
+      try{
+        const _storedQ=sessionStorage.getItem('hermes-queue-'+sid);
+        if(_storedQ){
+          const _entries=JSON.parse(_storedQ);
+          if(Array.isArray(_entries)&&_entries.length){
+            // Timestamp guard: drop entries older than the last assistant response
+            // (means the agent already ran and the queue was already dispatched)
+            const _lastMsg=(data.session.messages||[]).slice().reverse()
+              .find(m=>m&&m.role==='assistant');
+            const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
+            const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
+            if(_fresh.length){
+              // Idle path: restore the first entry as a composer draft only. Do NOT
+              // re-enqueue into SESSION_QUEUES — if we did, send() would dispatch the
+              // draft directly (S.busy=false) and then setBusy(false) would drain the
+              // same entry from the queue, causing a duplicate send. Any follow-up
+              // entries (2..N) are discarded by design; the toast tells the user so.
+              const _first=_fresh[0];
+              const _msg=$&&$('msg');
+              if(_msg&&_first.text&&!_msg.value){
+                _msg.value=_first.text||'';
+                if(typeof autoResize==='function') autoResize();
+                if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
+              }
+              // Clear persisted queue now that the draft is in the composer
+              sessionStorage.removeItem('hermes-queue-'+sid);
+            } else {
+              sessionStorage.removeItem('hermes-queue-'+sid);
+            }
+          } else {
+            sessionStorage.removeItem('hermes-queue-'+sid);
+          }
+        }
+      }catch(_){sessionStorage.removeItem('hermes-queue-'+sid);}
+    }
     updateQueueBadge(sid);
     S.messages=data.session.messages||[];
     const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(data.session):null;
@@ -618,6 +656,21 @@ function renderSessionListFromCache(){
     const tsMs=_sessionTimestampMs(s);
     titleRow.appendChild(title);
     sessionText.appendChild(titleRow);
+    const density=(window._sidebarDensity==='detailed'?'detailed':'compact');
+    if(density==='detailed'){
+      const metaBits=[];
+      const msgCount=typeof s.message_count==='number'?s.message_count:0;
+      const msgLabel=(typeof t==='function')
+        ? t('session_meta_messages', msgCount)
+        : `${msgCount} msg${msgCount===1?'':'s'}`;
+      metaBits.push(msgLabel);
+      if(s.model) metaBits.push(s.model);
+      if(_showAllProfiles&&s.profile) metaBits.push(s.profile);
+      const meta=document.createElement('div');
+      meta.className='session-meta';
+      meta.textContent=metaBits.join(' · ');
+      sessionText.appendChild(meta);
+    }
     // Append tag chips after the title text
     for(const tag of tags){
       const chip=document.createElement('span');

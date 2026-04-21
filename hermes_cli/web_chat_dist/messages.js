@@ -71,6 +71,12 @@ async function send(){
       model:S.session.model||$('modelSelect').value,workspace:S.session.workspace,
       attachments:uploaded.length?uploaded:undefined
     })});
+    if(startData.effective_model && S.session){
+      S.session.model=startData.effective_model;
+      localStorage.setItem('hermes-webui-model', startData.effective_model);
+      if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'));
+      if(typeof syncTopbar==='function') syncTopbar();
+    }
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
     markInflight(activeSid, streamId);
@@ -514,9 +520,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         try{
           const d=JSON.parse(e.data);
           const isRateLimit=d.type==='rate_limit';
+          const isQuotaExhausted=d.type==='quota_exhausted';
           const isAuthMismatch=d.type==='auth_mismatch';
           const isNoResponse=d.type==='no_response';
-          const label=isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isNoResponse?'No response received':'Error';
+          const label=isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isNoResponse?'No response received':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`});
         }catch(_){
