@@ -347,7 +347,7 @@ async function renderSessionList(){
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
     const [sessData, projData] = await Promise.all([
-      api('/api/sessions'),
+      api('/api/chat/sessions'),
       api('/api/projects'),
     ]);
     _allSessions = sessData.sessions||[];
