@@ -318,6 +318,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _wireSSE(source){
+    console.log('[SSE] Connection established');
+
     source.addEventListener('token',e=>{
       if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
@@ -340,8 +342,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('tool',e=>{
       const d=JSON.parse(e.data);
-      if(d.name==='clarify') return;
+      console.log('[SSE][tool] received:', d);
+      if(d.name==='clarify') {
+        console.log('[SSE][tool] skipping clarify tool');
+        return;
+      }
       const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false, tid:d.tid||`live-${Date.now()}-${Math.random().toString(36).slice(2,8)}`};
+      console.log('[SSE][tool] created tool card:', tc);
       const inflight = INFLIGHT[activeSid] || (INFLIGHT[activeSid] = {
         messages:[...S.messages],
         uploaded:[],
@@ -351,8 +358,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       INFLIGHT[activeSid].toolCalls.push(tc);
       S.toolCalls=INFLIGHT[activeSid].toolCalls;
       persistInflightState();
+      console.log('[SSE][tool] inflight toolCalls:', inflight.toolCalls);
 
-      if(!S.session||S.session.session_id!==activeSid) return;
+      if(!S.session||S.session.session_id!==activeSid) {
+        console.log('[SSE][tool] no active session, skipping render');
+        return;
+      }
       // NOTE: don't removeThinking() here — keep the thinking card visible
       // above the tool card so the turn reads top-to-bottom as:
       // user → thinking → tool cards → response. Removing it caused the card
@@ -362,13 +373,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       appendLiveToolCard(tc);
       scrollIfPinned();
+      console.log('[SSE][tool] rendered tool card');
     });
 
     source.addEventListener('tool_complete',e=>{
       const d=JSON.parse(e.data);
-      if(d.name==='clarify') return;
+      console.log('[SSE][tool_complete] received:', d);
+      if(d.name==='clarify') {
+        console.log('[SSE][tool_complete] skipping clarify tool');
+        return;
+      }
       const inflight=INFLIGHT[activeSid];
-      if(!inflight) return;
+      if(!inflight) {
+        console.log('[SSE][tool_complete] no inflight state for activeSid:', activeSid);
+        return;
+      }
       if(!Array.isArray(inflight.toolCalls)) inflight.toolCalls=[];
       let tc=null;
       for(let i=inflight.toolCalls.length-1;i>=0;i--){
@@ -378,8 +397,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           break;
         }
       }
+      console.log('[SSE][tool_complete] found matching tool card:', tc);
       if(!tc){
-        tc={name:d.name||'tool', preview:d.preview||'', args:d.args||{}, snippet:'', done:true};
+        tc={name:d.name||'tool', preview:d.preview||'', args:d.args||{}, snippet:'', done:true, tid:d.tid};
+        console.log('[SSE][tool_complete] created new tool card:', tc);
         inflight.toolCalls.push(tc);
       }
       tc.preview=d.preview||tc.preview||'';
@@ -387,11 +408,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       tc.done=true;
       tc.is_error=!!d.is_error;
       if(d.duration!==undefined) tc.duration=d.duration;
+      // Use the full result from the backend for the snippet
+      if(d.result) {
+        console.log('[SSE][tool_complete] setting snippet, length:', d.result.length);
+        tc.snippet = d.result;
+      } else {
+        console.log('[SSE][tool_complete] NO RESULT in event data!');
+      }
+      tc.tid = d.tid || tc.tid;
       S.toolCalls=inflight.toolCalls;
       persistInflightState();
-      if(!S.session||S.session.session_id!==activeSid) return;
+      if(!S.session||S.session.session_id!==activeSid) {
+        console.log('[SSE][tool_complete] no active session, skipping render');
+        return;
+      }
       appendLiveToolCard(tc);
       scrollIfPinned();
+      console.log('[SSE][tool_complete] rendered tool card, snippet:', tc.snippet?.substring(0, 100));
     });
 
     source.addEventListener('approval',e=>{
@@ -444,6 +477,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('done',e=>{
+      console.log('[SSE][done] received:', JSON.parse(e.data));
       _terminalStateReached=true;
       const d=JSON.parse(e.data);
       delete INFLIGHT[activeSid];

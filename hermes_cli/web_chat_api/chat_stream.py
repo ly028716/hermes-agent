@@ -149,6 +149,7 @@ async def run_chat_stream(
 
     # Get toolsets
     toolsets = get_toolsets_for_chat()
+    print(f"[CHAT_STREAM] toolsets={toolsets}", flush=True)
 
     # Set environment for workspace
     env_prev = {}
@@ -179,13 +180,87 @@ async def run_chat_stream(
             if on_token:
                 on_token(delta)
 
-        def _on_tool_callback(name, preview, args, **kwargs):
+        # Tool call ID generator for correlating start/complete events
+        _tool_call_counter = 0
+        _pending_tool_calls = {}  # key: name, value: {tid, preview, args}
+
+        def _on_tool_callback(event_type, name, preview, args, **kwargs):
+            """Handle tool progress events from the agent.
+
+            Args:
+                event_type: "tool.started" or "tool.completed"
+                name: Tool name
+                preview: Tool preview (for started) or None (for completed)
+                args: Tool arguments (for started) or None (for completed)
+                kwargs: Additional data (duration, is_error, etc.)
+            """
+            nonlocal _tool_call_counter
             if cancel_event.is_set():
                 return
+
+            # Generate or retrieve tool call ID
+            tid = None
+            if event_type == "tool.started":
+                _tool_call_counter += 1
+                tid = f"webui-{_tool_call_counter}"
+                # Store for later completion event
+                _pending_tool_calls[name] = {'tid': tid, 'preview': preview, 'args': args}
+                kwargs['tid'] = tid
+                print(f"[TOOL] started: name={name}, tid={tid}", flush=True)
+            elif event_type == "tool.completed":
+                # Just retrieve the tid, don't remove yet - tool_complete_callback will remove
+                pending = _pending_tool_calls.get(name)
+                if pending:
+                    tid = pending['tid']
+                else:
+                    _tool_call_counter += 1
+                    tid = f"webui-{_tool_call_counter}"
+                kwargs['tid'] = tid
+                print(f"[TOOL] completed (progress): name={name}, tid={tid}", flush=True)
+
             if on_tool:
-                on_tool(name, preview, args, kwargs)
+                on_tool(event_type, name, preview, args, kwargs, tid=tid)
+
+        def _on_tool_complete_callback(llm_tid, name, args, result):
+            """Handle tool completion with full result from the agent.
+
+            Args:
+                llm_tid: The LLM's tool call id (e.g., 'call_abc123')
+                name: Tool name
+                args: Tool arguments
+                result: Full tool output result
+            """
+            if cancel_event.is_set():
+                return
+
+            print(f"[TOOL_COMPLETE] called: llm_tid={llm_tid}, name={name}", flush=True)
+
+            # Look up the pending call by name to get our tid, then remove it
+            pending = _pending_tool_calls.pop(name, None)
+            tid = pending['tid'] if pending else None
+
+            if not tid:
+                # Fallback: create a new tid (shouldn't happen if flow is correct)
+                _tool_call_counter += 1
+                tid = f"webui-{_tool_call_counter}"
+                print(f"[TOOL_COMPLETE] created new tid={tid} (no pending call)", flush=True)
+            else:
+                print(f"[TOOL_COMPLETE] found tid={tid} from pending call", flush=True)
+
+            preview = pending.get('preview', '') if pending else ''
+
+            # Send tool complete event with full result
+            if on_tool:
+                print(f"[TOOL_COMPLETE] sending event: tid={tid}, result_len={len(result) if result else 0}", flush=True)
+                on_tool("tool.completed", name, preview, args, {
+                    'duration': 0,
+                    'is_error': False,
+                    'tid': tid,
+                    'result': result,
+                }, tid=tid)
 
         # Create agent
+        print(f"[CHAT_STREAM] Creating AIAgent with toolsets={toolsets}, session_id={session_id}", flush=True)
         agent = AIAgent(
             model=resolved_model,
             provider=resolved_provider,
@@ -199,6 +274,7 @@ async def run_chat_stream(
             session_db=_get_session_db(),
             stream_delta_callback=_on_token_callback,
             tool_progress_callback=_on_tool_callback,
+            tool_complete_callback=_on_tool_complete_callback,
         )
 
         with STREAMS_LOCK:
@@ -218,9 +294,13 @@ async def run_chat_stream(
             """Run agent synchronously in thread."""
             try:
                 result = agent.run_conversation(user_message)
+                print(f"[CHAT_STREAM] agent.run_conversation completed: result keys={result.keys() if isinstance(result, dict) else type(result)}", flush=True)
+                if isinstance(result, dict):
+                    print(f"[CHAT_STREAM] result: final_response={result.get('final_response', '')[:200]}..., completed={result.get('completed')}", flush=True)
                 return ('success', result)
             except Exception as e:
                 logger.exception(f"Agent execution error: {e}")
+                print(f"[CHAT_STREAM] agent.run_conversation error: {e}", flush=True)
                 return ('error', str(e))
 
         # Execute agent in thread pool with timeout (default 10 minutes)

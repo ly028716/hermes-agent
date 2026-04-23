@@ -2448,17 +2448,48 @@ async def chat_start(request: Request, body: ChatMessage):
         except asyncio.QueueFull:
             pass
 
-    def on_tool(name, preview, args, kwargs):
+    def on_tool(event_type, name, preview, args, kwargs, tid=None):
+        """Handle tool progress events from the agent.
+
+        Args:
+            event_type: "tool.started" or "tool.completed"
+            name: Tool name
+            preview: Tool preview string
+            args: Tool arguments dict
+            kwargs: Additional data (duration, is_error, result, etc.)
+            tid: Tool call ID for correlating start/complete events
+        """
         try:
-            queue.put_nowait(("tool", {
-                "name": name,
-                "preview": preview,
-                "args": args,
-                "duration": kwargs.get("duration"),
-                "is_error": kwargs.get("is_error", False),
-            }))
+            if event_type == "tool.started":
+                # Send tool start event to frontend
+                print(f"[WEB_SERVER] tool started: name={name}, tid={tid}", flush=True)
+                queue.put_nowait(("tool", {
+                    "name": name,
+                    "preview": preview,
+                    "args": args,
+                    "tid": tid,
+                }))
+            elif event_type == "tool.completed":
+                # Send tool complete event to frontend with full result
+                result = kwargs.get('result', '')
+                print(f"[WEB_SERVER] tool completed: name={name}, tid={tid}, result_len={len(result) if result else 0}", flush=True)
+                # Truncate very large results for the preview
+                result_preview = result[:500] + '...' if len(result) > 500 else result
+                queue.put_nowait(("tool_complete", {
+                    "name": name,
+                    "preview": preview,
+                    "args": args,
+                    "duration": kwargs.get("duration"),
+                    "is_error": kwargs.get("is_error", False),
+                    "tid": tid,
+                    "result": result_preview,
+                }))
         except asyncio.QueueFull:
-            pass
+            print(f"[WEB_SERVER] Queue full, dropping event: {event_type} {name}", flush=True)
+        except Exception as e:
+            print(f"[WEB_SERVER] Error in on_tool callback: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
 
     def on_complete(response, messages):
         try:
