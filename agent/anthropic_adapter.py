@@ -17,7 +17,6 @@ import os
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
-from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from utils import normalize_proxy_env_vars
 
@@ -1599,109 +1598,4 @@ def build_anthropic_kwargs(
     return kwargs
 
 
-def normalize_anthropic_response(
-    response,
-    strip_tool_prefix: bool = False,
-) -> Tuple[SimpleNamespace, str]:
-    """Normalize Anthropic response to match the shape expected by AIAgent.
 
-    Returns (assistant_message, finish_reason) where assistant_message has
-    .content, .tool_calls, and .reasoning attributes.
-
-    When *strip_tool_prefix* is True, removes the ``mcp_`` prefix that was
-    added to tool names for OAuth Claude Code compatibility.
-    """
-    text_parts = []
-    reasoning_parts = []
-    reasoning_details = []
-    tool_calls = []
-
-    for block in response.content:
-        if block.type == "text":
-            text_parts.append(block.text)
-        elif block.type == "thinking":
-            reasoning_parts.append(block.thinking)
-            block_dict = _to_plain_data(block)
-            if isinstance(block_dict, dict):
-                reasoning_details.append(block_dict)
-        elif block.type == "tool_use":
-            name = block.name
-            if strip_tool_prefix and name.startswith(_MCP_TOOL_PREFIX):
-                name = name[len(_MCP_TOOL_PREFIX):]
-            tool_calls.append(
-                SimpleNamespace(
-                    id=block.id,
-                    type="function",
-                    function=SimpleNamespace(
-                        name=name,
-                        arguments=json.dumps(block.input),
-                    ),
-                )
-            )
-
-    # Map Anthropic stop_reason to OpenAI finish_reason.
-    # Newer stop reasons added in Claude 4.5+ / 4.7:
-    #   - refusal: the model declined to answer (cyber safeguards, CSAM, etc.)
-    #   - model_context_window_exceeded: hit context limit (not max_tokens)
-    # Both need distinct handling upstream — a refusal should surface to the
-    # user with a clear message, and a context-window overflow should trigger
-    # compression/truncation rather than be treated as normal end-of-turn.
-    stop_reason_map = {
-        "end_turn": "stop",
-        "tool_use": "tool_calls",
-        "max_tokens": "length",
-        "stop_sequence": "stop",
-        "refusal": "content_filter",
-        "model_context_window_exceeded": "length",
-    }
-    finish_reason = stop_reason_map.get(response.stop_reason, "stop")
-
-    return (
-        SimpleNamespace(
-            content="\n".join(text_parts) if text_parts else None,
-            tool_calls=tool_calls or None,
-            reasoning="\n\n".join(reasoning_parts) if reasoning_parts else None,
-            reasoning_content=None,
-            reasoning_details=reasoning_details or None,
-        ),
-        finish_reason,
-    )
-
-
-def normalize_anthropic_response_v2(
-    response,
-    strip_tool_prefix: bool = False,
-) -> "NormalizedResponse":
-    """Normalize Anthropic response to NormalizedResponse.
-
-    Wraps the existing normalize_anthropic_response() and maps its output
-    to the shared transport types.  This allows incremental migration —
-    one call site at a time — without changing the original function.
-    """
-    from agent.transports.types import NormalizedResponse, build_tool_call
-
-    assistant_msg, finish_reason = normalize_anthropic_response(response, strip_tool_prefix)
-
-    tool_calls = None
-    if assistant_msg.tool_calls:
-        tool_calls = [
-            build_tool_call(
-                id=tc.id,
-                name=tc.function.name,
-                arguments=tc.function.arguments,
-            )
-            for tc in assistant_msg.tool_calls
-        ]
-
-    provider_data = {}
-    if getattr(assistant_msg, "reasoning_details", None):
-        provider_data["reasoning_details"] = assistant_msg.reasoning_details
-
-    return NormalizedResponse(
-        content=assistant_msg.content,
-        tool_calls=tool_calls,
-        finish_reason=finish_reason,
-        reasoning=getattr(assistant_msg, "reasoning", None),
-        usage=None,  # Anthropic usage is on the raw response, not the normaliser
-        provider_data=provider_data or None,
-    )
