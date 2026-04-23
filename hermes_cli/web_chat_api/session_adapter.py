@@ -66,22 +66,52 @@ def get_session_endpoint_handler(
     """
     Get session details for API endpoint.
 
-    Uses persistent storage (models.py) instead of in-memory storage.
+    Now reads from SQLite database (source='webui') instead of file system.
 
     Args:
         session_id: Session ID to retrieve
-        state_dir: State directory (defaults to CHAT_STATE_DIR)
+        state_dir: State directory (defaults to CHAT_STATE_DIR) - DEPRECATED
 
     Returns:
         Session dict or None if not found
     """
-    state_dir = state_dir or CHAT_STATE_DIR
-    session = models.get_session(session_id, state_dir=state_dir)
+    try:
+        from hermes_state import SessionDB
+        
+        db = SessionDB()
+        try:
+            # Get session from database
+            session_meta = db.get_session(session_id)
+            if not session_meta or session_meta.get("source") != "webui":
+                return None
+            
+            # Get messages
+            messages = db.get_messages_as_conversation(session_id)
+            
+            # Convert to Chat UI format
+            return {
+                "session_id": session_id,
+                "title": session_meta.get("title") or "Untitled",
+                "workspace": "",  # Not stored in database
+                "model": session_meta.get("model", ""),
+                "messages": messages,
+                "created_at": session_meta.get("started_at", 0),
+                "updated_at": session_meta.get("ended_at") or session_meta.get("started_at", 0),
+            }
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.warning(f"Failed to load session {session_id} from database, falling back to file system: {e}")
+        
+        # Fallback to file-based implementation
+        state_dir = state_dir or CHAT_STATE_DIR
+        session = models.get_session(session_id, state_dir=state_dir)
 
-    if session is None:
-        return None
+        if session is None:
+            return None
 
-    return _to_api_format(session)
+        return _to_api_format(session)
 
 
 def list_sessions_handler(
@@ -92,39 +122,77 @@ def list_sessions_handler(
     """
     List all persistent sessions.
 
+    Now reads from SQLite database (source='webui') instead of file system
+    to fix the Chat UI sidebar empty issue.
+
     Args:
-        state_dir: State directory (defaults to CHAT_STATE_DIR)
+        state_dir: State directory (defaults to CHAT_STATE_DIR) - DEPRECATED, kept for compatibility
         limit: Maximum number of sessions to return
         offset: Number of sessions to skip
 
     Returns:
         List of session dicts
     """
-    state_dir = state_dir or CHAT_STATE_DIR
-    sessions_dir = state_dir / "sessions"
-
-    if not sessions_dir.exists():
-        return []
-
-    sessions = []
-    session_files = sorted(
-        sessions_dir.glob("*.json"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True  # Most recent first
-    )
-
-    # Apply offset and limit
-    for session_file in session_files[offset:offset + limit]:
+    try:
+        from hermes_state import SessionDB
+        
+        db = SessionDB()
         try:
-            session_id = session_file.stem
-            session = models.get_session(session_id, state_dir=state_dir)
-            if session:
-                sessions.append(_to_list_format(session))
-        except Exception as e:
-            logger.warning(f"Failed to load session {session_file}: {e}")
-            continue
+            # Get webui sessions from database
+            db_sessions = db.list_sessions_rich(
+                source="webui",
+                limit=limit,
+                offset=offset,
+                include_children=False
+            )
+            
+            # Convert to Chat UI format
+            sessions = []
+            for s in db_sessions:
+                sessions.append({
+                    "session_id": s["id"],
+                    "title": s.get("title") or "Untitled",
+                    "created_at": s.get("started_at", 0),
+                    "updated_at": s.get("last_active", s.get("started_at", 0)),
+                    "message_count": s.get("message_count", 0),
+                    "model": s.get("model", ""),
+                    "workspace": "",  # Not stored in database
+                    "is_cli_session": False,  # webui sessions are not CLI sessions
+                })
+            
+            return sessions
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.warning(f"Failed to load sessions from database, falling back to file system: {e}")
+        
+        # Fallback to original file-based implementation
+        state_dir = state_dir or CHAT_STATE_DIR
+        sessions_dir = state_dir / "sessions"
 
-    return sessions
+        if not sessions_dir.exists():
+            return []
+
+        sessions = []
+        session_files = sorted(
+            sessions_dir.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True  # Most recent first
+        )
+
+        # Apply offset and limit
+        for session_file in session_files[offset:offset + limit]:
+            try:
+                session_id = session_file.stem
+                session = models.get_session(session_id, state_dir=state_dir)
+                if session:
+                    sessions.append(_to_list_format(session))
+            except Exception as e:
+                logger.warning(f"Failed to load session {session_file}: {e}")
+                continue
+
+        return sessions
 
 
 def create_session_handler(
@@ -188,15 +256,37 @@ def delete_session_handler(
     """
     Delete a persistent session.
 
+    Now deletes from SQLite database (source='webui') instead of file system.
+
     Args:
         session_id: Session ID to delete
-        state_dir: State directory (defaults to CHAT_STATE_DIR)
+        state_dir: State directory (defaults to CHAT_STATE_DIR) - DEPRECATED
 
     Returns:
         True if deleted, False if not found
     """
-    state_dir = state_dir or CHAT_STATE_DIR
-    return models.delete_session(session_id, state_dir=state_dir)
+    try:
+        from hermes_state import SessionDB
+        
+        db = SessionDB()
+        try:
+            # Check if session exists and is webui source
+            session_meta = db.get_session(session_id)
+            if not session_meta or session_meta.get("source") != "webui":
+                return False
+            
+            # Delete from database
+            db.delete_session(session_id)
+            return True
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.warning(f"Failed to delete session {session_id} from database, falling back to file system: {e}")
+        
+        # Fallback to file-based implementation
+        state_dir = state_dir or CHAT_STATE_DIR
+        return models.delete_session(session_id, state_dir=state_dir)
 
 
 def save_session_after_chat(

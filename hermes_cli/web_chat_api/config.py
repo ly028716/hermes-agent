@@ -86,10 +86,10 @@ def resolve_model_provider(model_str: str) -> tuple:
 def get_toolsets_for_chat() -> list:
     """Get enabled toolsets for chat sessions."""
     try:
-        from hermes_cli.tools_config import get_platform_tools
+        from hermes_cli.tools_config import _get_platform_tools
         from hermes_cli.config import load_config
         config = load_config()
-        return get_platform_tools(config, 'cli', include_default_mcp_servers=True)
+        return list(_get_platform_tools(config, 'cli', include_default_mcp_servers=True))
     except Exception:
         return []
 
