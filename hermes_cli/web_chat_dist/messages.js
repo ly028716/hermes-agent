@@ -585,30 +585,56 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('error',async e=>{
+      console.error('[SSE] Error event triggered:', {
+        readyState: source.readyState,
+        activeSid: activeSid,
+        streamId: streamId,
+        terminalStateReached: _terminalStateReached,
+        reconnectAttempted: _reconnectAttempted,
+        timestamp: new Date().toISOString()
+      });
       source.close();
       if(_terminalStateReached){
+        console.log('[SSE] Terminal state reached, closing source');
         _closeSource();
         return;
       }
       // Attempt one reconnect if the stream is still active server-side
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
+        console.log('[SSE] Attempting reconnect...');
         setComposerStatus('Reconnecting…');
         setTimeout(async()=>{
           try{
+            console.log('[SSE] Checking stream status...');
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+            console.log('[SSE] Stream status:', st);
             if(st.active){
+              console.log('[SSE] Stream still active, reconnecting...');
               setComposerStatus('Reconnected');
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,location.href).href,{withCredentials:true}));
               return;
             }
-          }catch(_){}
-          if(await _restoreSettledSession()) return;
+            console.log('[SSE] Stream not active, trying to restore session...');
+          }catch(err){
+            console.error('[SSE] Error checking stream status:', err);
+          }
+          console.log('[SSE] Attempting to restore settled session...');
+          if(await _restoreSettledSession()) {
+            console.log('[SSE] Session restored successfully');
+            return;
+          }
+          console.error('[SSE] Could not restore session, calling _handleStreamError');
           _handleStreamError();
         },1500);
         return;
       }
-      if(await _restoreSettledSession()) return;
+      console.log('[SSE] No reconnect attempt, trying to restore session...');
+      if(await _restoreSettledSession()) {
+        console.log('[SSE] Session restored successfully');
+        return;
+      }
+      console.error('[SSE] Could not restore session, calling _handleStreamError');
       _handleStreamError();
     });
 
@@ -631,11 +657,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   async function _restoreSettledSession(){
+    console.log('[DEBUG] _restoreSettledSession called for session:', activeSid);
     try{
+      console.log('[DEBUG] Fetching session from /api/session?session_id=' + activeSid);
       const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      console.log('[DEBUG] Session API response:', data);
       const session=data&&data.session;
-      if(!session) return false;
-      if(session.active_stream_id||session.pending_user_message) return false;
+      if(!session) {
+        console.log('[DEBUG] No session found in response');
+        return false;
+      }
+      console.log('[DEBUG] Session found:', session);
+      if(session.active_stream_id||session.pending_user_message) {
+        console.log('[DEBUG] Session still has active stream or pending message, not restoring');
+        return false;
+      }
       delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
       _closeSource();
       if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
@@ -658,13 +694,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         syncTopbar();renderMessages();
       }
       renderSessionList();setBusy(false);setComposerStatus('');
+      console.log('[DEBUG] Session restored successfully');
       return true;
-    }catch(_){
+    }catch(err){
+      console.error('[DEBUG] _restoreSettledSession error:', err);
+      console.error('[DEBUG] Error details:', {
+        message: err.message,
+        stack: err.stack,
+        response: err.response
+      });
       return false;
     }
   }
 
   function _handleStreamError(){
+    console.error('[DEBUG] _handleStreamError called for session:', activeSid);
+    console.error('[DEBUG] Current state:', {
+      activeSid: activeSid,
+      hasSession: !!(S.session),
+      sessionId: S.session ? S.session.session_id : null,
+      assistantText: assistantText,
+      inflightExists: !!INFLIGHT[activeSid]
+    });
     delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
     _closeSource();
     if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
@@ -672,8 +723,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(S.session&&S.session.session_id===activeSid){
       S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
       clearLiveToolCards();if(!assistantText)removeThinking();
+      console.error('[DEBUG] Adding "Connection lost" error message to chat');
       S.messages.push({role:'assistant',content:'**Error:** Connection lost'});renderMessages();
     }else{
+      console.error('[DEBUG] Session mismatch or no session, tracking background error');
       if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
         trackBackgroundError(activeSid,_errTitle,'Connection lost');

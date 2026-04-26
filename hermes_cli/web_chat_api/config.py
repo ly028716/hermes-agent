@@ -56,31 +56,58 @@ def _clear_thread_env(prev: Dict[str, Optional[str]]) -> None:
 def resolve_model_provider(model_str: str) -> tuple:
     """Resolve model string into (model, provider, base_url).
 
+    Uses the same runtime provider resolution as CLI mode to ensure
+    consistent behavior between CLI and Web UI.
+
     Handles formats like:
     - "anthropic/claude-sonnet-4.6" -> ("claude-sonnet-4.6", "anthropic", None)
     - "openai/gpt-4o" -> ("gpt-4o", "openai", None)
-    - "claude-sonnet-4.6" -> ("claude-sonnet-4.6", None, None)
+    - "minimax/minimax-m2.7" with NVIDIA NIM config -> uses NVIDIA endpoint
     """
     if not model_str:
         return None, None, None
 
     model_str = str(model_str).strip()
 
-    # Check for provider prefix
-    if '/' in model_str:
-        parts = model_str.split('/', 1)
-        provider = parts[0].lower()
-        model = parts[1]
+    # Try to use the same runtime provider resolution as CLI
+    try:
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        
+        # Extract provider from model string if present
+        if '/' in model_str:
+            provider_prefix = model_str.split('/', 1)[0].lower()
+        else:
+            provider_prefix = None
+        
+        # Resolve using runtime provider (reads config.yaml)
+        runtime = resolve_runtime_provider(requested=provider_prefix)
+        
+        # Extract model name (without provider prefix)
+        if '/' in model_str:
+            model = model_str.split('/', 1)[1]
+        else:
+            model = model_str
+        
+        return model, runtime.get('provider'), runtime.get('base_url')
+        
+    except Exception as e:
+        # Fallback to simple parsing if runtime provider fails
+        print(f"[resolve_model_provider] Runtime provider failed: {e}, using fallback")
+        
+        if '/' in model_str:
+            parts = model_str.split('/', 1)
+            provider = parts[0].lower()
+            model = parts[1]
 
-        # Known provider base URLs
-        base_url_map = {
-            'openrouter': 'https://openrouter.ai/api/v1',
-            'nous': 'https://inference.nousresearch.com/v1',
-        }
-        base_url = base_url_map.get(provider)
-        return model, provider, base_url
+            # Known provider base URLs (fallback only)
+            base_url_map = {
+                'openrouter': 'https://openrouter.ai/api/v1',
+                'nous': 'https://inference.nousresearch.com/v1',
+            }
+            base_url = base_url_map.get(provider)
+            return model, provider, base_url
 
-    return model_str, None, None
+        return model_str, None, None
 
 
 def get_toolsets_for_chat() -> list:

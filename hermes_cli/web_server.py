@@ -2191,16 +2191,46 @@ async def list_models_stub():
     """Stub for Hermes WebUI models API - returns available models for dropdown."""
     try:
         from hermes_cli.config import load_config
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        from hermes_cli.models import provider_model_ids, _PROVIDER_LABELS
+        
         config = load_config()
         default_model = config.get("model", "")
         if isinstance(default_model, dict):
             default_model = default_model.get("default", "")
+        
+        # Resolve the active provider from config
+        try:
+            runtime = resolve_runtime_provider(default_model, config)
+            provider = runtime.get("provider", "")
+        except Exception:
+            provider = ""
+        
+        # Get all available models for the provider
+        model_ids = []
+        if provider:
+            try:
+                model_ids = provider_model_ids(provider)
+            except Exception:
+                pass
+        
+        # If no models found, fall back to the default model
+        if not model_ids and default_model:
+            model_ids = [default_model]
+        elif not model_ids:
+            model_ids = ["claude-sonnet-4.6"]
+        
+        # Format models for the frontend
+        models = [{"id": mid, "label": mid} for mid in model_ids]
+        provider_label = _PROVIDER_LABELS.get(provider, provider) if provider else "default"
+        
         return {
-            "groups": [{"provider": "default", "models": [{"id": default_model or "claude-sonnet-4.6", "label": default_model or "Claude Sonnet 4.6"}]}],
-            "default_model": default_model or "claude-sonnet-4.6",
-            "active_provider": None,
+            "groups": [{"provider": provider_label, "models": models}],
+            "default_model": default_model or model_ids[0],
+            "active_provider": provider,
         }
-    except (ImportError, FileNotFoundError, KeyError):
+    except (ImportError, FileNotFoundError, KeyError) as e:
+        _log.exception("Failed to load models")
         return {
             "groups": [{"provider": "default", "models": [{"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"}]}],
             "default_model": "claude-sonnet-4.6",
@@ -2453,6 +2483,27 @@ async def chat_start(request: Request, body: ChatMessage):
         session["model"] = body.model
     if body.workspace:
         session["workspace"] = body.workspace
+
+    # Pre-create session in database to avoid 404 on /api/session queries
+    # This ensures the session exists before the frontend polls for it
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        try:
+            # Check if session already exists
+            existing = db.get_session(session_id)
+            if existing is None:
+                # Create new session with source='webui'
+                db.create_session(
+                    session_id=session_id,
+                    source='webui',
+                    model=session["model"],
+                )
+                _log.info(f"Pre-created webui session in database: {session_id}")
+        finally:
+            db.close()
+    except Exception as e:
+        _log.warning(f"Failed to pre-create session {session_id} in database: {e}")
 
     # Create event queue for this stream
     queue: asyncio.Queue = asyncio.Queue()
@@ -2833,7 +2884,8 @@ async def get_session(session_id: str):
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    return session
+    # Frontend expects {session: {...}} format, not direct session object
+    return {"session": session}
 
 
 @app.post("/api/session/update")

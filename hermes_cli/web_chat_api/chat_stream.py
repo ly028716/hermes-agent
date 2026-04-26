@@ -131,6 +131,7 @@ async def run_chat_stream(
 
     # Resolve model/provider
     resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model or session.model)
+    print(f"[CHAT_STREAM] resolve_model_provider returned: model={resolved_model}, provider={resolved_provider}, base_url={resolved_base_url}", flush=True)
 
     # Get API key via runtime provider
     resolved_api_key = None
