@@ -74,6 +74,6 @@ mini-swe-agent/
 .nix-stamps/
 result
 website/static/api/skills-index.json
-
 # Claude Code project files
 .claude/
+models-dev-upstream/
