@@ -63,6 +63,8 @@ def resolve_model_provider(model_str: str) -> tuple:
     - "anthropic/claude-sonnet-4.6" -> ("claude-sonnet-4.6", "anthropic", None)
     - "openai/gpt-4o" -> ("gpt-4o", "openai", None)
     - "minimax/minimax-m2.7" with NVIDIA NIM config -> uses NVIDIA endpoint
+    - "minimaxai/minimax-m2.7" -> falls back to config.yaml provider when
+      the prefix is not a recognized built-in provider
     """
     if not model_str:
         return None, None, None
@@ -72,28 +74,46 @@ def resolve_model_provider(model_str: str) -> tuple:
     # Try to use the same runtime provider resolution as CLI
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
-        
+        from hermes_cli.auth import PROVIDER_REGISTRY
+
         # Extract provider from model string if present
         if '/' in model_str:
             provider_prefix = model_str.split('/', 1)[0].lower()
         else:
             provider_prefix = None
-        
+
+        # If the prefix is a recognized built-in provider, use it directly.
+        # Otherwise, fall back to the config's configured provider so that
+        # model strings with non-standard prefixes (e.g. "minimaxai/...")
+        # still resolve to the endpoint configured in config.yaml.
+        if provider_prefix and provider_prefix not in PROVIDER_REGISTRY:
+            # Not a built-in provider — use the config's provider instead
+            try:
+                from hermes_cli.config import load_config
+                cfg = load_config()
+                model_cfg = cfg.get('model', {})
+                if isinstance(model_cfg, dict):
+                    cfg_provider = model_cfg.get('provider')
+                    if isinstance(cfg_provider, str) and cfg_provider.strip():
+                        provider_prefix = cfg_provider.strip().lower()
+                    else:
+                        provider_prefix = None
+            except Exception:
+                pass
+
         # Resolve using runtime provider (reads config.yaml)
         runtime = resolve_runtime_provider(requested=provider_prefix)
-        
-        # Extract model name (without provider prefix)
-        if '/' in model_str:
-            model = model_str.split('/', 1)[1]
-        else:
-            model = model_str
-        
+
+        # Use the FULL original model string — many providers (e.g. NVIDIA NIM)
+        # require the complete model identifier including the provider prefix.
+        model = model_str
+
         return model, runtime.get('provider'), runtime.get('base_url')
-        
+
     except Exception as e:
         # Fallback to simple parsing if runtime provider fails
         print(f"[resolve_model_provider] Runtime provider failed: {e}, using fallback")
-        
+
         if '/' in model_str:
             parts = model_str.split('/', 1)
             provider = parts[0].lower()

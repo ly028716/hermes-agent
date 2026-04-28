@@ -129,9 +129,14 @@ async def run_chat_stream(
     if model:
         session.model = model
 
-    # Resolve model/provider
-    resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model or session.model)
-    print(f"[CHAT_STREAM] resolve_model_provider returned: model={resolved_model}, provider={resolved_provider}, base_url={resolved_base_url}", flush=True)
+    # Resolve model/provider — fall back to config default when no model specified
+    model_str = model or session.model or ''
+    if not model_str:
+        from hermes_cli.web_chat_api.config import get_default_model
+        model_str = get_default_model() or ''
+
+    resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model_str)
+    print(f"[CHAT_STREAM] model_str={model_str!r}, resolved: model={resolved_model}, provider={resolved_provider}, base_url={resolved_base_url}", flush=True)
 
     # Get API key via runtime provider
     resolved_api_key = None
@@ -261,7 +266,7 @@ async def run_chat_stream(
                 }, tid=tid)
 
         # Create agent
-        print(f"[CHAT_STREAM] Creating AIAgent with toolsets={toolsets}, session_id={session_id}", flush=True)
+        print(f"[CHAT_STREAM] Creating AIAgent with model={resolved_model!r}, provider={resolved_provider!r}, base_url={resolved_base_url!r}, toolsets={toolsets}, session_id={session_id}", flush=True)
         agent = AIAgent(
             model=resolved_model,
             provider=resolved_provider,
